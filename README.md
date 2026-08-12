@@ -60,7 +60,7 @@ cp .env.example .env
 ## Running
 
 ```bash
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --reload-dir app
 ```
 
 ```bash

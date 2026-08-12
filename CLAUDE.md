@@ -63,7 +63,7 @@ pip install -e ".[dev]"
 cp .env.example .env   # then fill in real credentials
 
 # Run the service
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --reload-dir app
 
 # Lint / type-check / test
 ruff check app/
@@ -169,6 +169,13 @@ cache is actually shared across both tool modules rather than duplicated.
 - The `.venv` hasn't been created yet, or dependencies aren't installed — run the one-time
   setup under Local Development above. Hooks in `.claude/settings.json` call `.venv/bin/ruff`
   etc. directly (not the bare command), so they need the venv to exist at the repo root.
+
+**`uvicorn --reload` crashes with `TimeoutError: [Errno 60] Operation timed out` reading a `.venv` file,
+or reload-loops on package files like `fastapi/__init__.py`:**
+- The reloader is watching the whole project root, including `.venv/lib/.../site-packages/` — thousands
+  of installed-package files it has no reason to watch, which also adds to disk-I/O pressure (see next
+  entry). Always run with `--reload-dir app` to scope watching to actual source files:
+  `uvicorn app.main:app --reload --reload-dir app`.
 
 **Tests are extremely slow (10+ minutes for a handful of tests):**
 - Check for system-level memory/disk pressure (`vm_stat`, `sysctl vm.swapusage`) before assuming

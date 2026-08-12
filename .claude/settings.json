@@ -64,18 +64,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".venv/bin/mypy ."
-          },
-          {
-            "type": "command",
-            "command": ".venv/bin/ruff check ."
-          },
-          {
-            "type": "command",
-            "command": ".venv/bin/pytest"
-          },
-          {
-            "type": "command",
             "command": "claudekit-hooks run check-todos"
           },
           {
