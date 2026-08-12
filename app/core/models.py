@@ -10,6 +10,7 @@ class Issue(BaseModel):
     status: str
     due_date: date | None
     has_linked_pr: bool
+    linked_pr: "PullRequest | None" = None
     priority_score: float  # set by core/ranking.py, not the API layer
 
 

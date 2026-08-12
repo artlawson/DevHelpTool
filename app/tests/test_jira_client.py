@@ -31,6 +31,7 @@ async def test_search_sends_get_with_jql_param_and_basic_auth(settings: Settings
     assert issues == [{"key": "PROJ-1"}]
     request = route.calls[0].request
     assert request.url.params["jql"] == "assignee = currentUser()"
+    assert request.url.params["fields"] == "summary,priority,status,duedate"
     assert request.headers["Authorization"].startswith("Basic ")
 
 

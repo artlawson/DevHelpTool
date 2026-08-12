@@ -115,6 +115,56 @@ async def test_get_issues_without_prs_returns_error_when_github_fails(monkeypatc
     assert result.error is not None
 
 
+async def test_get_my_issues_with_linked_prs_attaches_matching_pr(monkeypatch):
+    mock_jira_search = AsyncMock(return_value=[RAW_ISSUE, RAW_ISSUE_2])
+    raw_pr = {
+        "title": "Fix PROJ-1: null pointer",
+        "body": "",
+        "repository_url": "https://api.github.com/repos/org/repo",
+        "number": 42,
+        "html_url": "https://github.com/org/repo/pull/42",
+        "created_at": "2026-08-01T00:00:00+00:00",
+    }
+    mock_github_search = AsyncMock(return_value=[raw_pr])
+    monkeypatch.setattr(jira_tools.jira_client, "search", mock_jira_search)
+    monkeypatch.setattr(jira_tools.github_client, "search_prs", mock_github_search)
+
+    result = await jira_tools.get_my_issues_with_linked_prs()
+
+    assert result.ok is True
+    assert result.data is not None
+    by_key = {i.key: i for i in result.data}
+    assert by_key["PROJ-1"].has_linked_pr is True
+    assert by_key["PROJ-1"].linked_pr is not None
+    assert by_key["PROJ-1"].linked_pr.number == 42
+    assert by_key["PROJ-2"].has_linked_pr is False
+    assert by_key["PROJ-2"].linked_pr is None
+
+
+async def test_get_my_issues_with_linked_prs_returns_error_when_jira_fails(monkeypatch):
+    mock_jira_search = AsyncMock(side_effect=RuntimeError("500 Internal Server Error"))
+    monkeypatch.setattr(jira_tools.jira_client, "search", mock_jira_search)
+
+    result = await jira_tools.get_my_issues_with_linked_prs()
+
+    assert result.ok is False
+    assert result.error is not None
+
+
+async def test_get_my_issues_with_linked_prs_returns_error_when_github_fails(
+    monkeypatch,
+):
+    mock_jira_search = AsyncMock(return_value=[RAW_ISSUE])
+    mock_github_search = AsyncMock(side_effect=RuntimeError("503 Service Unavailable"))
+    monkeypatch.setattr(jira_tools.jira_client, "search", mock_jira_search)
+    monkeypatch.setattr(jira_tools.github_client, "search_prs", mock_github_search)
+
+    result = await jira_tools.get_my_issues_with_linked_prs()
+
+    assert result.ok is False
+    assert result.error is not None
+
+
 async def test_neither_tool_module_imports_anthropic():
     import ast
     import inspect

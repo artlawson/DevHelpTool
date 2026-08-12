@@ -3,6 +3,8 @@ import httpx
 from app.config import Settings
 from app.core.cache import TTLCache
 
+_ISSUE_FIELDS = "summary,priority,status,duedate"
+
 
 class JiraClient:
     def __init__(self, settings: Settings, cache: TTLCache | None = None):
@@ -21,7 +23,8 @@ class JiraClient:
         ) as client:
             response = await client.get(
                 "/rest/api/3/search/jql",
-                params={"jql": jql},
+                # search/jql omits `key` and `fields` unless explicitly requested.
+                params={"jql": jql, "fields": _ISSUE_FIELDS},
             )
             response.raise_for_status()
             issues = response.json()["issues"]

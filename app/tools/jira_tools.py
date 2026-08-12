@@ -4,9 +4,9 @@ from datetime import date
 from app.clients.jira_client import JiraClient
 from app.config import settings
 from app.core.errors import sanitize_error
-from app.core.models import Issue, ToolResult
+from app.core.models import Issue, PullRequest, ToolResult
 from app.core.ranking import RawIssue, rank, score_issue
-from app.tools.github_tools import github_client
+from app.tools.github_tools import github_client, to_pull_request
 
 jira_client = JiraClient(settings)
 
@@ -16,7 +16,7 @@ jira_client = JiraClient(settings)
 _ISSUE_KEY_PATTERN = re.compile(r"[A-Z]+-\d+")
 
 
-def _map_issue(raw: dict, *, has_linked_pr: bool = False) -> Issue:
+def _map_issue(raw: dict, *, linked_pr: PullRequest | None = None) -> Issue:
     fields = raw["fields"]
     due_date_str = fields.get("duedate")
     due_date = date.fromisoformat(due_date_str) if due_date_str else None
@@ -28,7 +28,8 @@ def _map_issue(raw: dict, *, has_linked_pr: bool = False) -> Issue:
         priority=priority,
         status=fields["status"]["name"],
         due_date=due_date,
-        has_linked_pr=has_linked_pr,
+        has_linked_pr=linked_pr is not None,
+        linked_pr=linked_pr,
         priority_score=score,
     )
 
@@ -52,25 +53,50 @@ def _pr_searchable_text(raw_pr: dict) -> str:
     return f"{raw_pr.get('title', '')} {raw_pr.get('body') or ''}"
 
 
+async def _fetch_raw_prs_by_issue_key() -> dict[str, dict]:
+    gh_query = f"is:pr author:{settings.github_username}"
+    raw_prs = await github_client.search_prs(gh_query)
+    by_key: dict[str, dict] = {}
+    for raw_pr in raw_prs:
+        for key in _ISSUE_KEY_PATTERN.findall(_pr_searchable_text(raw_pr)):
+            by_key.setdefault(key, raw_pr)
+    return by_key
+
+
 async def get_issues_without_prs() -> ToolResult[list[Issue]]:
     jql = "assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC"
     try:
         raw_issues = await jira_client.search(jql)
-        gh_query = f"is:pr author:{settings.github_username}"
-        raw_prs = await github_client.search_prs(gh_query)
+        raw_prs_by_key = await _fetch_raw_prs_by_issue_key()
     except Exception as exc:
         return ToolResult(ok=False, data=None, error=sanitize_error(exc))
 
-    pr_text_blob = "\n".join(_pr_searchable_text(pr) for pr in raw_prs)
-    referenced_keys = set(_ISSUE_KEY_PATTERN.findall(pr_text_blob))
-
     issues_without_prs = [
-        _map_issue(raw, has_linked_pr=False)
-        for raw in raw_issues
-        if raw["key"] not in referenced_keys
+        _map_issue(raw) for raw in raw_issues if raw["key"] not in raw_prs_by_key
     ]
     return ToolResult(
         ok=True,
         data=rank(issues_without_prs, lambda i: i.priority_score),
         error=None,
     )
+
+
+async def get_my_issues_with_linked_prs() -> ToolResult[list[Issue]]:
+    jql = "assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC"
+    try:
+        raw_issues = await jira_client.search(jql)
+        raw_prs_by_key = await _fetch_raw_prs_by_issue_key()
+    except Exception as exc:
+        return ToolResult(ok=False, data=None, error=sanitize_error(exc))
+
+    issues = [
+        _map_issue(
+            raw,
+            linked_pr=to_pull_request(raw_prs_by_key[raw["key"]])
+            if raw["key"] in raw_prs_by_key
+            else None,
+        )
+        for raw in raw_issues
+    ]
+    ranked = rank(issues, lambda i: i.priority_score)
+    return ToolResult(ok=True, data=ranked, error=None)

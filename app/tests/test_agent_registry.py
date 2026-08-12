@@ -5,7 +5,7 @@ from app.agent.schemas import TOOL_SCHEMAS
 
 
 def test_tool_schemas_have_empty_properties():
-    assert len(TOOL_SCHEMAS) == 4
+    assert len(TOOL_SCHEMAS) == 5
     for schema in TOOL_SCHEMAS:
         assert schema["input_schema"] == {"type": "object", "properties": {}}
 

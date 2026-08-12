@@ -31,7 +31,7 @@ class FakeResponse:
 
 
 async def test_loop_dispatches_tool_and_produces_final_answer(monkeypatch):
-    tool_use = FakeToolUseBlock("call_1", "jira.get_my_high_priority_issues")
+    tool_use = FakeToolUseBlock("call_1", "jira_get_my_high_priority_issues")
     first_response = FakeResponse([tool_use], "tool_use")
     final_response = FakeResponse(
         [FakeTextBlock("You have 1 high priority issue.")], "end_turn"
@@ -42,20 +42,20 @@ async def test_loop_dispatches_tool_and_produces_final_answer(monkeypatch):
 
     mock_tool = AsyncMock(return_value=ToolResult(ok=True, data=[], error=None))
     monkeypatch.setitem(
-        orchestrator.TOOL_REGISTRY, "jira.get_my_high_priority_issues", mock_tool
+        orchestrator.TOOL_REGISTRY, "jira_get_my_high_priority_issues", mock_tool
     )
 
     result = await orchestrator.handle_query("what should I work on today?")
 
     assert result.answer == "You have 1 high priority issue."
-    assert result.tool_calls == ["jira.get_my_high_priority_issues"]
+    assert result.tool_calls == ["jira_get_my_high_priority_issues"]
     assert result.warnings == []
     mock_tool.assert_awaited_once()
 
 
 async def test_failing_tool_produces_warning_and_loop_continues(monkeypatch):
-    tool_use_1 = FakeToolUseBlock("call_1", "jira.get_my_high_priority_issues")
-    tool_use_2 = FakeToolUseBlock("call_2", "github.get_my_open_prs")
+    tool_use_1 = FakeToolUseBlock("call_1", "jira_get_my_high_priority_issues")
+    tool_use_2 = FakeToolUseBlock("call_2", "github_get_my_open_prs")
     first_response = FakeResponse([tool_use_1, tool_use_2], "tool_use")
     final_response = FakeResponse([FakeTextBlock("Partial results.")], "end_turn")
 
@@ -65,23 +65,23 @@ async def test_failing_tool_produces_warning_and_loop_continues(monkeypatch):
     failing_tool = AsyncMock(return_value=ToolResult(ok=False, data=None, error="503"))
     succeeding_tool = AsyncMock(return_value=ToolResult(ok=True, data=[], error=None))
     monkeypatch.setitem(
-        orchestrator.TOOL_REGISTRY, "jira.get_my_high_priority_issues", failing_tool
+        orchestrator.TOOL_REGISTRY, "jira_get_my_high_priority_issues", failing_tool
     )
     monkeypatch.setitem(
-        orchestrator.TOOL_REGISTRY, "github.get_my_open_prs", succeeding_tool
+        orchestrator.TOOL_REGISTRY, "github_get_my_open_prs", succeeding_tool
     )
 
     result = await orchestrator.handle_query("status?")
 
     assert result.answer == "Partial results."
-    assert result.tool_calls == ["github.get_my_open_prs"]
+    assert result.tool_calls == ["github_get_my_open_prs"]
     assert len(result.warnings) == 1
-    assert "jira.get_my_high_priority_issues" in result.warnings[0]
+    assert "jira_get_my_high_priority_issues" in result.warnings[0]
     assert "503" in result.warnings[0]
 
 
 async def test_tool_raising_exception_produces_warning_and_loop_continues(monkeypatch):
-    tool_use = FakeToolUseBlock("call_1", "jira.get_my_high_priority_issues")
+    tool_use = FakeToolUseBlock("call_1", "jira_get_my_high_priority_issues")
     first_response = FakeResponse([tool_use], "tool_use")
     final_response = FakeResponse([FakeTextBlock("Something went wrong.")], "end_turn")
 
@@ -90,7 +90,7 @@ async def test_tool_raising_exception_produces_warning_and_loop_continues(monkey
 
     raising_tool = AsyncMock(side_effect=RuntimeError("boom"))
     monkeypatch.setitem(
-        orchestrator.TOOL_REGISTRY, "jira.get_my_high_priority_issues", raising_tool
+        orchestrator.TOOL_REGISTRY, "jira_get_my_high_priority_issues", raising_tool
     )
 
     result = await orchestrator.handle_query("status?")
@@ -99,13 +99,13 @@ async def test_tool_raising_exception_produces_warning_and_loop_continues(monkey
     assert len(result.warnings) == 1
     # sanitize_error() strips the raw exception message (spec §10); only the
     # exception type and tool name should be visible, never "boom" itself.
-    assert "jira.get_my_high_priority_issues" in result.warnings[0]
+    assert "jira_get_my_high_priority_issues" in result.warnings[0]
     assert "RuntimeError" in result.warnings[0]
     assert "boom" not in result.warnings[0]
 
 
 async def test_loop_terminates_at_max_iterations_with_forced_final_call(monkeypatch):
-    tool_use = FakeToolUseBlock("call_1", "jira.get_my_high_priority_issues")
+    tool_use = FakeToolUseBlock("call_1", "jira_get_my_high_priority_issues")
     always_tool_use = FakeResponse([tool_use], "tool_use")
     forced_final = FakeResponse([FakeTextBlock("forced final answer")], "end_turn")
 
@@ -120,7 +120,7 @@ async def test_loop_terminates_at_max_iterations_with_forced_final_call(monkeypa
     monkeypatch.setattr(orchestrator.anthropic_client.messages, "create", fake_create)
     mock_tool = AsyncMock(return_value=ToolResult(ok=True, data=[], error=None))
     monkeypatch.setitem(
-        orchestrator.TOOL_REGISTRY, "jira.get_my_high_priority_issues", mock_tool
+        orchestrator.TOOL_REGISTRY, "jira_get_my_high_priority_issues", mock_tool
     )
 
     result = await orchestrator.handle_query("status?")
@@ -146,8 +146,8 @@ async def test_anthropic_api_error_raises_orchestrator_unavailable(monkeypatch):
 async def test_concurrent_tool_use_blocks_dispatched_via_gather(monkeypatch):
     import asyncio
 
-    tool_use_1 = FakeToolUseBlock("call_1", "jira.get_my_high_priority_issues")
-    tool_use_2 = FakeToolUseBlock("call_2", "github.get_my_open_prs")
+    tool_use_1 = FakeToolUseBlock("call_1", "jira_get_my_high_priority_issues")
+    tool_use_2 = FakeToolUseBlock("call_2", "github_get_my_open_prs")
     first_response = FakeResponse([tool_use_1, tool_use_2], "tool_use")
     final_response = FakeResponse([FakeTextBlock("done")], "end_turn")
 
@@ -166,13 +166,13 @@ async def test_concurrent_tool_use_blocks_dispatched_via_gather(monkeypatch):
 
     monkeypatch.setitem(
         orchestrator.TOOL_REGISTRY,
-        "jira.get_my_high_priority_issues",
-        lambda: slow_tool("jira.get_my_high_priority_issues"),
+        "jira_get_my_high_priority_issues",
+        lambda: slow_tool("jira_get_my_high_priority_issues"),
     )
     monkeypatch.setitem(
         orchestrator.TOOL_REGISTRY,
-        "github.get_my_open_prs",
-        lambda: slow_tool("github.get_my_open_prs"),
+        "github_get_my_open_prs",
+        lambda: slow_tool("github_get_my_open_prs"),
     )
 
     await orchestrator.handle_query("status?")
@@ -180,7 +180,7 @@ async def test_concurrent_tool_use_blocks_dispatched_via_gather(monkeypatch):
     # If dispatched sequentially, the second tool's start would be >= the
     # first tool's finish. Concurrent dispatch means both start before either
     # finishes.
-    jira_name = "jira.get_my_high_priority_issues"
-    github_name = "github.get_my_open_prs"
+    jira_name = "jira_get_my_high_priority_issues"
+    github_name = "github_get_my_open_prs"
     assert started_at[github_name] < finished_at[jira_name]
     assert started_at[jira_name] < finished_at[github_name]

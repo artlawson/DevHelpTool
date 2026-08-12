@@ -19,7 +19,7 @@ async def test_ask_returns_answer_on_success(client, monkeypatch):
     mock_handle_query = AsyncMock(
         return_value=AskResponse(
             answer="you're all caught up",
-            tool_calls=["jira.get_my_high_priority_issues"],
+            tool_calls=["jira_get_my_high_priority_issues"],
             warnings=[],
         )
     )
@@ -30,7 +30,7 @@ async def test_ask_returns_answer_on_success(client, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["answer"] == "you're all caught up"
-    assert body["tool_calls"] == ["jira.get_my_high_priority_issues"]
+    assert body["tool_calls"] == ["jira_get_my_high_priority_issues"]
     assert body["warnings"] == []
     mock_handle_query.assert_awaited_once_with("what should I work on today?")
 

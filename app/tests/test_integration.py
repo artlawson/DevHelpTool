@@ -23,8 +23,8 @@ async def test_partial_failure_flows_end_to_end_through_the_real_api(monkeypatch
     monkeypatch.setattr(jira_tools.jira_client, "_cache", TTLCache())
     monkeypatch.setattr(github_tools.github_client, "_cache", TTLCache())
 
-    tool_use_jira = FakeToolUseBlock("call_1", "jira.get_my_high_priority_issues")
-    tool_use_github = FakeToolUseBlock("call_2", "github.get_prs_awaiting_my_review")
+    tool_use_jira = FakeToolUseBlock("call_1", "jira_get_my_high_priority_issues")
+    tool_use_github = FakeToolUseBlock("call_2", "github_get_prs_awaiting_my_review")
     first_response = FakeResponse([tool_use_jira, tool_use_github], "tool_use")
     final_response = FakeResponse(
         [
@@ -85,9 +85,9 @@ async def test_partial_failure_flows_end_to_end_through_the_real_api(monkeypatch
     assert response.status_code == 200
     body = response.json()
 
-    assert body["tool_calls"] == ["jira.get_my_high_priority_issues"]
+    assert body["tool_calls"] == ["jira_get_my_high_priority_issues"]
     assert len(body["warnings"]) == 1
-    assert "github.get_prs_awaiting_my_review" in body["warnings"][0]
+    assert "github_get_prs_awaiting_my_review" in body["warnings"][0]
     # Sanitized per spec §10 - the raw GitHub response body must not leak.
     assert "internal error detail" not in body["warnings"][0]
 
