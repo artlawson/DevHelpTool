@@ -1,0 +1,41 @@
+[project]
+name = "engineering-productivity-agent"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "anthropic",
+    "httpx",
+    "pydantic",
+    "pydantic-settings",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "respx",
+    "ruff",
+    "mypy",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "ASYNC", "RUF", "DTZ", "FURB"]
+ignore = [
+    # Tool functions intentionally catch Exception at the boundary and convert
+    # it to ToolResult(ok=False, ...) so a single integration failure can't
+    # crash the whole /ask request - this is a deliberate architectural
+    # pattern (spec §6.6), not an oversight.
+    "BLE001",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]

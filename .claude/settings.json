@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claudekit-hooks run lint-changed"
+            "command": "sh -c 'case \"{{file}}\" in *.py) .venv/bin/ruff check --fix \"{{file}}\" ;; esac'"
           }
         ]
       },
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claudekit-hooks run typecheck-changed"
+            "command": "sh -c 'case \"{{file}}\" in *.py) .venv/bin/mypy \"{{file}}\" ;; esac'"
           }
         ]
       },
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claudekit-hooks run test-changed"
+            "command": "sh -c 'case \"{{file}}\" in test_*.py|*_test.py) .venv/bin/pytest \"{{file}}\" -x ;; esac'"
           }
         ]
       },
@@ -64,15 +64,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claudekit-hooks run typecheck-project"
+            "command": ".venv/bin/mypy ."
           },
           {
             "type": "command",
-            "command": "claudekit-hooks run lint-project"
+            "command": ".venv/bin/ruff check ."
           },
           {
             "type": "command",
-            "command": "claudekit-hooks run test-project"
+            "command": ".venv/bin/pytest"
           },
           {
             "type": "command",

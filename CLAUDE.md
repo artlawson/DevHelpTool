@@ -1,69 +1,88 @@
-# CLAUDE.md — [YOUR_PROJECT_NAME]
-
-> **Note**: This is a template. Search for `[CUSTOMIZE]` to find sections that need project-specific details.
+# CLAUDE.md — DevHelpTool
 
 ## Project Purpose
 
-[CUSTOMIZE: Describe what this project does, who it's for, and its core value proposition. 2-3 sentences.]
+Developer help tool. Summarize the information needed for daily standup updates and give an
+engineer a clear idea of what work they have and should prioritize.
+
+Concretely: a local FastAPI service that answers natural-language questions ("what should I
+work on today?") by orchestrating a hand-rolled Claude tool-calling loop over the Jira and
+GitHub REST APIs, with deterministic Python ranking (not LLM-driven) and graceful
+partial-failure degradation. See `specs/feat-engineering-productivity-agent-mvp.md` for the
+full technical spec and `docs/ideation/engineering-productivity-agent-mvp.md` for the research
+and design decisions behind it.
 
 ---
 
 ## Directory Structure
 
-[CUSTOMIZE: Update this to match your actual project structure]
-
 ```
 /
-├── CLAUDE.md                     # You are here
-├── README.md                     # Project overview
-├── package.json                  # Dependencies
-├── tsconfig.json                 # TypeScript config (if applicable)
+├── CLAUDE.md
+├── README.md
+├── pyproject.toml                # dependencies, ruff/mypy/pytest config
+├── .env.example                  # documents required env vars; .env itself is gitignored
 │
-├── src/                          # Source code
-│   ├── components/               # UI components
-│   ├── lib/                      # Utilities and helpers
-│   ├── hooks/                    # Custom React hooks
-│   └── styles/                   # Stylesheets
+├── app/
+│   ├── main.py                   # FastAPI app: POST /ask, GET /health
+│   ├── config.py                 # pydantic-settings Settings, loaded from .env
+│   ├── agent/
+│   │   ├── orchestrator.py       # hand-rolled Claude tool-calling loop
+│   │   ├── registry.py           # TOOL_REGISTRY: tool name -> callable
+│   │   └── schemas.py            # JSON-schema tool definitions passed to Claude
+│   ├── clients/
+│   │   ├── jira_client.py        # thin httpx wrapper: auth, JQL search, TTL cache
+│   │   └── github_client.py      # thin httpx wrapper: auth, search_prs(), TTL cache
+│   ├── tools/
+│   │   ├── jira_tools.py         # get_my_high_priority_issues, get_issues_without_prs
+│   │   └── github_tools.py       # get_my_open_prs, get_prs_awaiting_my_review
+│   ├── core/
+│   │   ├── models.py             # Issue, PullRequest, ToolResult[T], AskResponse
+│   │   ├── ranking.py            # score_issue(), score_pr() - pure, LLM-free
+│   │   ├── cache.py              # TTLCache (in-memory, injectable clock for tests)
+│   │   └── errors.py             # sanitize_error() - never leak raw exception text
+│   └── tests/                    # pytest; all external HTTP mocked via respx
 │
-├── tests/                        # Test files
-│
-└── docs/                         # Documentation
+├── specs/                        # technical spec + task breakdown for this project
+└── docs/ideation/                # research and design-decision history
 ```
+
+Tool implementations (`app/tools/`) never import `anthropic` — `app/agent/schemas.py` and
+`app/agent/registry.py` are the only modules aware of the LLM. This separation is the core
+architectural decision of the project; keep it when adding new tools.
 
 ---
 
 ## Local Development
 
-[CUSTOMIZE: Add your specific development commands]
-
 ```bash
-# Install dependencies
-npm install
+# One-time setup
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env   # then fill in real credentials
 
-# Start development server
-npm run dev
+# Run the service
+uvicorn app.main:app --reload
 
-# Run tests
-npm test
-
-# Build for production
-npm run build
+# Lint / type-check / test
+ruff check app/
+mypy app/
+pytest app/tests/
 ```
 
-**Local URL:** [CUSTOMIZE: e.g., http://localhost:3000]
+**Local URL:** http://localhost:8000 (`POST /ask`, `GET /health`)
 
 ### Environment Variables
-
-[CUSTOMIZE: List required environment variables]
 
 ```bash
 cp .env.example .env
 ```
 
-Required variables:
-- `DATABASE_URL` - Database connection string
-- `API_KEY` - External API key
-- [Add more as needed]
+Required variables (see `.env.example` for descriptions):
+- `ANTHROPIC_API_KEY`
+- `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`
+- `GITHUB_TOKEN`, `GITHUB_USERNAME`
 
 ---
 
@@ -71,26 +90,28 @@ Required variables:
 
 ### Naming
 
-- **Directories:** kebab-case (`user-profile`, `api-handlers`)
-- **Components:** PascalCase (`UserProfile.tsx`, `ApiHandler.tsx`)
-- **Utilities:** camelCase (`formatDate.ts`, `parseConfig.ts`)
-- **Constants:** SCREAMING_SNAKE_CASE (`MAX_RETRIES`, `API_BASE_URL`)
+- **Modules/files:** snake_case (`jira_tools.py`, `ttl_cache.py`)
+- **Classes:** PascalCase (`JiraClient`, `ToolResult`)
+- **Functions/variables:** snake_case (`get_my_open_prs`, `priority_score`)
+- **Constants:** SCREAMING_SNAKE_CASE (`MAX_ITERATIONS`, `TOOL_SCHEMAS`)
 
 ### File Organization
 
-[CUSTOMIZE: Add your specific file organization rules]
-
-- Keep related files close together
-- One component per file
-- Co-locate tests with source files when possible
+- One module per responsibility, grouped by layer (`agent/`, `clients/`, `tools/`, `core/`) —
+  see Directory Structure above.
+- Tests live in `app/tests/`, one test file per source module (`test_jira_tools.py` tests
+  `app/tools/jira_tools.py`), plus `test_integration.py` for end-to-end flows.
+- Keep tools independent of the orchestration layer: a tool function must be callable and
+  testable with zero knowledge of Claude/the LLM.
 
 ### Code Style
 
-[CUSTOMIZE: Reference your linting/formatting setup]
-
-- Use ESLint and Prettier (config in `.eslintrc` and `.prettierrc`)
-- Run `npm run lint` before committing
-- TypeScript strict mode enabled
+- `ruff check app/` and `mypy app/` must both pass — enforced by this repo's `.claude/settings.json`
+  hooks (per-file on Write/Edit, project-wide on Stop).
+- `ruff`'s rule selection and the one deliberate ignore (`BLE001`, for the tool-boundary
+  try/except pattern) are documented in `pyproject.toml`.
+- Prefer plain functions and dataclasses/Pydantic models over classes with behavior, except
+  where a class genuinely holds connection state (`JiraClient`, `GitHubClient`, `TTLCache`).
 
 ---
 
@@ -98,153 +119,114 @@ Required variables:
 
 ### Error Handling
 
-```typescript
-// Prefer explicit error types
-type Result<T> = { success: true; data: T } | { success: false; error: string };
+Every tool function returns a `ToolResult` rather than raising, so one integration failing
+degrades the response gracefully instead of crashing the whole `/ask` request:
 
-async function fetchData(): Promise<Result<Data>> {
-  try {
-    const data = await api.get('/endpoint');
-    return { success: true, data };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
+```python
+# app/core/models.py
+class ToolResult[T](BaseModel):
+    ok: bool
+    data: T | None
+    error: str | None
 ```
 
-### React Strict Mode Initialization
-
-Prevent duplicate initialization in development (Strict Mode mounts components twice):
-
-```tsx
-const MyComponent = () => {
-  const [data, setData] = useState([]);
-  const hasInitialized = useRef(false);
-
-  useEffect(() => {
-    if (hasInitialized.current) return;
-    hasInitialized.current = true;
-    initializeData();
-  }, []);
-
-  return <div>{/* ... */}</div>;
-};
+```python
+# app/tools/*.py — the pattern every tool follows
+try:
+    raw = await some_client.fetch(...)
+except Exception as exc:
+    return ToolResult(ok=False, data=None, error=sanitize_error(exc))
+return ToolResult(ok=True, data=mapped, error=None)
 ```
+
+`sanitize_error()` (`app/core/errors.py`) ensures only a status code/exception type reaches the
+client or the LLM — never a raw response body, which could contain sensitive data.
 
 ### Async Operations
 
-```typescript
-// Use AbortController for cancellable requests
-useEffect(() => {
-  const controller = new AbortController();
+Tool calls within a single Claude turn are dispatched concurrently, not sequentially:
 
-  fetchData({ signal: controller.signal })
-    .then(setData)
-    .catch(err => {
-      if (err.name !== 'AbortError') handleError(err);
-    });
-
-  return () => controller.abort();
-}, []);
+```python
+# app/agent/orchestrator.py
+tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+results = await asyncio.gather(
+    *[dispatch(block, called_tools, warnings) for block in tool_use_blocks]
+)
 ```
+
+### Caching
+
+`JiraClient.search()` and `GitHubClient.search_prs()` both wrap their HTTP call in a
+`TTLCache` (default 60s), keyed on the query string. `GitHubClient` is a single shared
+singleton (`app/tools/github_tools.py:github_client`, imported by `jira_tools.py` too) so the
+cache is actually shared across both tool modules rather than duplicated.
 
 ---
 
 ## Troubleshooting
 
-### Common Issues
+**`ruff`/`mypy`/`pytest` hooks fail with "command not found":**
+- The `.venv` hasn't been created yet, or dependencies aren't installed — run the one-time
+  setup under Local Development above. Hooks in `.claude/settings.json` call `.venv/bin/ruff`
+  etc. directly (not the bare command), so they need the venv to exist at the repo root.
 
-**Build fails with type errors:**
-- Run `npm run typecheck` to see all errors
-- Check that all imports resolve correctly
-- Verify environment variables are set
+**Tests are extremely slow (10+ minutes for a handful of tests):**
+- Check for system-level memory/disk pressure (`vm_stat`, `sysctl vm.swapusage`) before assuming
+  a code problem — this has been the actual cause during development, not a bug in the tests.
+  A `.venv/.metadata_never_index` marker is already in place to keep Spotlight from indexing
+  the virtualenv, which was a contributing factor.
 
-**Tests failing locally but passing in CI:**
-- Check for timezone-dependent assertions
-- Verify test isolation (no shared state)
-- Run tests in sequence: `npm test -- --runInBand`
-
-**Hot reload not working:**
-- Clear `.next` or `dist` cache folders
-- Restart the dev server
-- Check for circular imports
+**A test asserting on `mock.await_args_list[...].kwargs["messages"]` behaves unexpectedly:**
+- `handle_query()`'s `messages` list is mutated in place across loop iterations. A plain
+  `AsyncMock`'s recorded call args are references, not snapshots, so every recorded call ends
+  up showing the *final* state of the list. Capture a shallow copy inside a custom
+  `side_effect`/fake function instead (see `app/tests/test_integration.py` for the pattern).
 
 ---
 
 ## Dependencies
 
-[CUSTOMIZE: List your core dependencies and their purposes]
+Runtime (see `pyproject.toml` for the authoritative list):
+- `fastapi` + `uvicorn` — HTTP service
+- `anthropic` — Claude API client, used only in `app/agent/`
+- `httpx` — async HTTP client for Jira/GitHub, used only in `app/clients/`
+- `pydantic` + `pydantic-settings` — data models and `.env`-backed settings
 
-```json
-{
-  "dependencies": {
-    "react": "^18.x",
-    "typescript": "^5.x"
-  }
-}
-```
+Dev only:
+- `pytest` + `pytest-asyncio` — test runner
+- `respx` — mocks `httpx` calls in tests; no test hits a real network call
+- `ruff`, `mypy` — lint and type checking
+
+No `jira`/`PyGithub`/`atlassian-python-api` wrapper packages are used, deliberately — see
+spec §5 for the reasoning (direct API control, consistent async story, easier to mock).
 
 ---
 
 ## Task Management
 
-This project uses **STM (Simple Task Master)** for task tracking. STM should be used for:
-- Tracking implementation tasks from specifications
-- Managing dependencies between tasks
-- Persisting task state across sessions
+This project does **not** use STM ("Simple Task Master") despite earlier scaffolding
+referencing it — `stm` is not an installable package (`brew install anthropic/tap/stm` and
+`npm install -g @anthropic/stm` both 404; the tap/package don't exist publicly). Task tracking
+for this project's implementation used the session's built-in task tool instead.
 
-### Common STM Commands
-
-```bash
-# List all tasks
-stm list --pretty
-
-# Add a new task
-stm add "Task title" --description "Brief description" --validation "Acceptance criteria"
-
-# Update task status
-stm update <id> --status in_progress
-stm update <id> --status completed
-
-# Search tasks
-stm grep "pattern"
-```
+The implementation task breakdown itself is durable and lives in
+`specs/feat-engineering-productivity-agent-mvp-tasks.md` — treat that file as the source of
+truth for what was built and why, independent of whatever session-local task tracker is active.
 
 ### Workflow Integration
 
-1. **Specification Decomposition**: Use `/spec:decompose <spec-file>` to break specs into tasks
-2. **Task Execution**: Use `/spec:execute` to implement decomposed tasks
-3. **Progress Tracking**: Use `stm list --pretty` to monitor progress
+1. **Specification Decomposition**: `/spec:decompose <spec-file>` to break a spec into tasks
+2. **Task Execution**: `/spec:execute` to implement decomposed tasks
+3. **Progress Tracking**: whatever task tool is actually available in the session (check before
+   assuming STM)
 
 ---
 
 ## Deployment
 
-[CUSTOMIZE: Add your deployment process]
-
-### Staging
-
-```bash
-# Deploy to staging
-npm run deploy:staging
-```
-
-### Production
-
-```bash
-# Deploy to production
-npm run deploy:production
-```
-
-### Environment Configuration
-
-[CUSTOMIZE: Document your environment setup]
-
-| Environment | URL | Branch |
-|-------------|-----|--------|
-| Development | localhost:3000 | - |
-| Staging | staging.example.com | develop |
-| Production | example.com | main |
+Not applicable. This is a local-only, single-user tool by design — no authentication, no
+deployment target, no CI/CD. See spec §4 (Non-Goals) and §10 (Security Considerations) for the
+explicit reasoning; this is a stated scope boundary, not an oversight.
 
 ---
 
@@ -282,31 +264,20 @@ This project includes Claude Code slash commands for common workflows:
 
 ## Skills
 
-[CUSTOMIZE: Document any project-specific skills you create]
-
-Skills are project-specific knowledge bases in `.claude/skills/`. They encode:
-- Brand guidelines and design systems
-- Domain expertise and business logic
-- Technical patterns specific to this project
-
-To create a new skill, add a `.md` file to `.claude/skills/` with structured knowledge.
+No project-specific skills exist yet. Skills would live in `.claude/skills/` as structured
+`.md` knowledge bases (e.g. Jira/GitHub API quirks discovered during development); add one if
+a piece of domain knowledge needs to persist across sessions beyond what's already in this
+file and the specs.
 
 ---
 
 ## Getting Help
 
-- Check existing code for patterns and examples
-- Use `/task-context <topic>` to find relevant context
-- Reference framework documentation
-- Use specialized agents for domain expertise (TypeScript, React, databases, etc.)
-
----
-
-## [CUSTOMIZE: Project-Specific Sections]
-
-Add sections specific to your project:
-- API documentation
-- Database schema
-- Authentication patterns
-- Third-party integrations
-- Business logic rules
+- Check `specs/feat-engineering-productivity-agent-mvp.md` and the task breakdown for
+  architectural intent before making design changes.
+- This repo's `.claude/agents/` roster is mostly TypeScript/React/Node-oriented (inherited from
+  the starter kit this project began from) and doesn't include a Python specialist — for
+  Python-specific work, direct implementation or the general-purpose agent is more useful than
+  reaching for a mismatched specialist.
+- `code-review-expert` is language-agnostic and has been used effectively for reviewing this
+  codebase.

@@ -1,311 +1,104 @@
-# Claude Code Starter Kit
+# Engineering Productivity Agent
 
-A pre-configured Claude Code infrastructure with production-ready commands, agents, and hooks. Start any project with a complete AI-assisted development workflow from day one.
+A local FastAPI service that answers natural-language questions about your current engineering work — "what should I work on today?", "which high-priority Jira tickets don't have PRs?", "what's awaiting my review?" — by orchestrating a hand-rolled Claude tool-calling loop over the Jira and GitHub REST APIs.
 
-## What's Included
+Data is fetched and deterministically ranked in Python (priority, due date, review-request age); Claude's role is limited to deciding which tools to call and narrating the final answer — it never decides what's "important."
 
-### Commands (23)
+## Architecture
 
-Slash commands for common development workflows:
-
-| Category | Commands | Purpose |
-|----------|----------|---------|
-| **Specification** | `/spec:ideate`, `/spec:create`, `/spec:validate`, `/spec:decompose`, `/spec:execute` | Full spec-driven development lifecycle |
-| **Code Quality** | `/code-review`, `/validate-and-fix` | Multi-aspect review and automated fixes |
-| **Git Workflow** | `/git:commit`, `/git:status`, `/git:push`, `/git:checkout` | Smart Git operations with conventions |
-| **Checkpoints** | `/checkpoint:create`, `/checkpoint:list`, `/checkpoint:restore` | Safe experimentation with stash-based checkpoints |
-| **Research** | `/task-context`, `/preflight-discovery`, `/research`, `/web-analyze` | Context gathering and research workflows |
-| **Documentation** | `/create-dev-guide`, `/docs:sync`, `/create-e2e-test-plan` | Documentation generation and maintenance |
-| **Infrastructure** | `/create-subagent`, `/create-command`, `/agents-md:init` | Extend your Claude Code setup |
-
-### Agents (23)
-
-Specialized AI personas for domain expertise:
-
-| Domain | Agents |
-|--------|--------|
-| **TypeScript** | `typescript-expert`, `typescript-type-expert`, `typescript-build-expert` |
-| **React** | `react-expert`, `react-performance-expert` |
-| **Framework** | `nextjs-expert` |
-| **Database** | `database-expert`, `postgres-expert` |
-| **DevOps** | `devops-expert`, `docker-expert`, `github-actions-expert` |
-| **Testing** | `playwright-expert`, `quick-check-expert` |
-| **Quality** | `code-review-expert`, `linting-expert`, `refactoring-expert` |
-| **Other** | `git-expert`, `documentation-expert`, `css-styling-expert`, `research-expert`, `triage-expert`, `code-search` |
-
-### Hooks
-
-Pre-configured automation that runs on every code change:
-
-- **PreToolUse**: File guard checks before modifications
-- **PostToolUse**: Lint, typecheck, and test changed files
-- **Stop**: Full project validation when session ends
-
-## Quick Start
-
-### Option 1: Fork This Repository
-
-1. Fork this repo to your GitHub account
-2. Clone your fork to a new project directory
-3. Customize `CLAUDE.md` (search for `[CUSTOMIZE]`)
-4. Start Claude Code
-
-### Option 2: Copy to Existing Project
-
-```bash
-# From your project root
-git clone https://github.com/YOUR_ORG/claude-code-starter-kit.git /tmp/ccs
-cp -r /tmp/ccs/.claude .
-cp /tmp/ccs/CLAUDE.md .
-rm -rf /tmp/ccs
+```
+Client (curl / thin CLI)
+        │  POST /ask {"query": "..."}
+        ▼
+FastAPI app (app/main.py)
+        │
+        ▼
+Orchestrator (app/agent/orchestrator.py)
+  - hand-rolled loop against the anthropic SDK
+  - dispatches tool_use blocks via TOOL_REGISTRY
+        │
+        ├──► app/tools/jira_tools.py    ──► app/clients/jira_client.py    ──► Jira REST v3
+        └──► app/tools/github_tools.py  ──► app/clients/github_client.py  ──► GitHub REST Search API
+        │
+        ▼
+app/core/ranking.py (deterministic scoring, pure functions)
+        │
+        ▼
+Claude narrates the final answer from ranked, structured tool results
+        │
+        ▼
+FastAPI returns {"answer": "...", "tool_calls": [...], "warnings": [...]}
 ```
 
-### Option 3: Use as Template
+Tool implementations never import `anthropic` — `app/agent/schemas.py` and `app/agent/registry.py` are the only modules aware of the LLM. Every tool returns a `ToolResult` (`ok`/`data`/`error`), so one integration failing degrades the response gracefully instead of crashing the whole request.
 
-Click "Use this template" on GitHub to create a new repository with this structure.
+## Setup
 
-## Prerequisites
-
-### Required: claudekit
-
-The hooks system uses `claudekit-hooks` for file watching and validation. Install it:
+Requires Python 3.12+.
 
 ```bash
-npm install -g @anthropic/claudekit
-# or
-brew install anthropic/tap/claudekit
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
-Verify installation:
+Copy `.env.example` to `.env` and fill in your credentials:
 
 ```bash
-claudekit status
+cp .env.example .env
 ```
 
-### Required: STM (Simple Task Master)
+| Variable | Description |
+|---|---|
+| `ANTHROPIC_API_KEY` | Claude API key used for the tool-calling loop |
+| `JIRA_BASE_URL` | Your Jira Cloud instance, e.g. `https://your-domain.atlassian.net` |
+| `JIRA_EMAIL` | Email of the Jira account tied to the API token |
+| `JIRA_API_TOKEN` | Jira API token (Basic Auth) — [create one here](https://id.atlassian.com/manage-profile/security/api-tokens) |
+| `GITHUB_TOKEN` | Fine-grained GitHub PAT, scoped to the repos you want monitored |
+| `GITHUB_USERNAME` | Your GitHub username, used to build `author:`/`review-requested:` queries |
 
-Task management commands use STM. Install it:
+## Running
 
 ```bash
-npm install -g @anthropic/stm
-# or
-brew install anthropic/tap/stm
+uvicorn app.main:app --reload
 ```
-
-Verify installation:
 
 ```bash
-stm --version
+curl -X POST localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"query": "what should I work on today?"}'
 ```
-
-## Configuration
-
-### 1. Customize CLAUDE.md
-
-Open `CLAUDE.md` and search for `[CUSTOMIZE]`. Update:
-
-- Project name and purpose
-- Directory structure
-- Local development commands
-- Environment variables
-- Deployment process
-
-### 2. Configure Hooks (Optional)
-
-Edit `.claude/settings.json` to customize hooks:
 
 ```json
 {
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "your-custom-lint-command"
-          }
-        ]
-      }
-    ]
-  }
+  "answer": "You have 2 high-priority tickets without PRs: PROJ-123 and PROJ-140. You also have 1 PR awaiting your review: org/repo#42.",
+  "tool_calls": ["jira.get_my_high_priority_issues", "jira.get_issues_without_prs", "github.get_prs_awaiting_my_review"],
+  "warnings": []
 }
 ```
 
-### 3. Add Project-Specific Skills (Optional)
+`GET /health` is a liveness check that requires no credentials or network access.
 
-Create skills for domain knowledge:
+**Scope note:** this is a local-only, single-user tool — `/ask` has no authentication, and there's no deployment story. That's intentional, not an oversight; see `specs/feat-engineering-productivity-agent-mvp.md` §4/§10 for the reasoning.
 
-```bash
-# Create a design system skill
-cat > .claude/skills/design-system.md << 'EOF'
-# Design System
-
-## Colors
-- Primary: #3B82F6
-- Accent: #F59E0B
-
-## Typography
-- Headings: Inter Bold
-- Body: Inter Regular
-EOF
-```
-
-### 4. Set Permissions (Optional)
-
-Create `.claude/settings.local.json` for auto-approved tools:
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(npm:*)",
-      "Bash(git:*)",
-      "SlashCommand(/spec:*)",
-      "WebSearch"
-    ]
-  }
-}
-```
-
-## Usage
-
-### Starting a New Feature
+## Development
 
 ```bash
-# 1. Ideate and explore
-/spec:ideate "Add user authentication"
-
-# 2. Create detailed spec
-/spec:create "OAuth2 authentication with Google and GitHub"
-
-# 3. Validate spec is complete
-/spec:validate specs/auth-feature.md
-
-# 4. Decompose into tasks
-/spec:decompose specs/auth-feature.md
-
-# 5. Execute implementation
-/spec:execute
+ruff check app/       # lint
+mypy app/              # type check
+pytest app/tests/      # tests (all external HTTP is mocked - no live credentials needed)
 ```
 
-### Code Review
+## Future Improvements
 
-```bash
-# Multi-aspect review of recent changes
-/code-review
+Deferred intentionally for MVP scope — documented here rather than built:
 
-# Or specify what to review
-/code-review src/components/
-```
+- **GitHub GraphQL API** instead of the REST Search API — a single query could pull PR/review data across multiple repos in one round trip, more efficient than the current per-query REST calls.
+- **OS keychain (`keyring` package)** instead of `.env` for credential storage — avoids plaintext secrets on disk.
+- **GitHub App auth** (short-lived, org-scoped, auditable installation tokens) instead of a personal access token — the "correct" production answer, but overkill for a single-user local tool.
 
-### Safe Experimentation
+## Project Docs
 
-```bash
-# Before trying something risky
-/checkpoint:create "Before refactoring auth module"
-
-# Try the change...
-
-# If it didn't work
-/checkpoint:restore latest
-```
-
-### Research and Context
-
-```bash
-# Quick context for a task
-/task-context "Add rate limiting to API endpoints"
-
-# Deep research with citations
-/research "Best practices for WebSocket authentication"
-```
-
-## Project Structure
-
-```
-.claude/
-├── commands/           # Slash commands
-│   ├── spec/          # Specification workflow
-│   ├── git/           # Git operations
-│   ├── checkpoint/    # Safe experimentation
-│   └── ...
-├── agents/            # Specialized AI personas
-│   ├── typescript/    # TypeScript experts
-│   ├── react/         # React experts
-│   ├── database/      # Database experts
-│   └── ...
-├── skills/            # Project knowledge (add your own)
-│   └── README.md      # How to create skills
-└── settings.json      # Hook configuration
-```
-
-## Extending
-
-### Create a New Command
-
-```bash
-/create-command my-command "What this command does"
-```
-
-Or manually create `.claude/commands/my-command.md`:
-
-```markdown
----
-description: What this command does
-argument-hint: "<required-arg>"
----
-
-# Command Name
-
-Instructions for Claude to follow when this command is invoked.
-```
-
-### Create a New Agent
-
-```bash
-/create-subagent
-```
-
-Follow the prompts to create a specialized agent.
-
-### Add a Skill
-
-See `.claude/skills/README.md` for guidance on creating domain-specific knowledge bases.
-
-## Troubleshooting
-
-### Hooks not running
-
-1. Verify claudekit is installed: `claudekit status`
-2. Check `.claude/settings.json` syntax is valid JSON
-3. Ensure matcher patterns match your tools
-
-### Commands not appearing
-
-1. Verify files are in `.claude/commands/`
-2. Check frontmatter has `description` field
-3. Restart Claude Code session
-
-### Agents not available
-
-1. Verify files are in `.claude/agents/`
-2. Check agent file has proper frontmatter
-3. Reference agents by exact filename (without `.md`)
-
-## Contributing
-
-Found a bug or want to add a feature? PRs welcome!
-
-1. Fork this repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
-## License
-
-MIT License - Use freely in your projects.
-
----
-
-Built with love by [33 Strategies](https://33strategies.ai)
+- `specs/feat-engineering-productivity-agent-mvp.md` — full technical spec
+- `specs/feat-engineering-productivity-agent-mvp-tasks.md` — implementation task breakdown
+- `docs/ideation/engineering-productivity-agent-mvp.md` — original research and design decisions
