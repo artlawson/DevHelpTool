@@ -23,16 +23,18 @@ def settings() -> Settings:
 @respx.mock
 async def test_search_sends_get_with_jql_param_and_basic_auth(settings: Settings):
     route = respx.get("https://example.atlassian.net/rest/api/3/search/jql").mock(
-        return_value=httpx.Response(200, json={"issues": [{"key": "PROJ-1"}]})
+        return_value=httpx.Response(200, json={"issues": [{"key": "AL-1"}]})
     )
 
     client = JiraClient(settings)
     issues = await client.search("assignee = currentUser()")
 
-    assert issues == [{"key": "PROJ-1"}]
+    assert issues == [{"key": "AL-1"}]
     request = route.calls[0].request
     assert request.url.params["jql"] == "assignee = currentUser()"
-    assert request.url.params["fields"] == "summary,priority,status,duedate"
+    assert (
+        request.url.params["fields"] == "summary,priority,status,duedate,description"
+    )
     assert request.headers["Authorization"].startswith("Basic ")
 
 
@@ -61,7 +63,7 @@ async def test_search_raises_on_auth_error(settings: Settings):
 @respx.mock
 async def test_search_uses_cache_for_repeated_jql_within_ttl(settings: Settings):
     route = respx.get("https://example.atlassian.net/rest/api/3/search/jql").mock(
-        return_value=httpx.Response(200, json={"issues": [{"key": "PROJ-1"}]})
+        return_value=httpx.Response(200, json={"issues": [{"key": "AL-1"}]})
     )
 
     client = JiraClient(settings, cache=TTLCache(ttl_seconds=60))

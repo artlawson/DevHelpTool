@@ -9,6 +9,8 @@ dependencies = [
     "httpx",
     "pydantic",
     "pydantic-settings",
+    "slack-bolt",
+    "aiohttp",
 ]
 
 [project.optional-dependencies]

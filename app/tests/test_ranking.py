@@ -1,6 +1,18 @@
 from datetime import UTC, date, datetime, timedelta
 
-from app.core.ranking import RawIssue, RawPR, rank, score_issue, score_pr
+from app.core.ranking import RawIssue, RawPR, is_overdue, rank, score_issue, score_pr
+
+
+def test_is_overdue_true_for_past_due_date():
+    assert is_overdue(date(2020, 1, 1)) is True
+
+
+def test_is_overdue_false_for_future_due_date():
+    assert is_overdue(date(2999, 1, 1)) is False
+
+
+def test_is_overdue_false_for_no_due_date():
+    assert is_overdue(None) is False
 
 
 def test_overdue_highest_priority_scores_higher_than_non_overdue_high():

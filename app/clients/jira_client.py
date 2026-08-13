@@ -3,7 +3,7 @@ import httpx
 from app.config import Settings
 from app.core.cache import TTLCache
 
-_ISSUE_FIELDS = "summary,priority,status,duedate"
+_ISSUE_FIELDS = "summary,priority,status,duedate,description"
 
 
 class JiraClient:

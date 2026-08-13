@@ -30,7 +30,7 @@ async def test_partial_failure_flows_end_to_end_through_the_real_api(monkeypatch
         [
             FakeTextBlock(
                 "GitHub data is currently unavailable, so this only reflects "
-                "Jira: PROJ-1 is your top priority."
+                "Jira: AL-1 is your top priority."
             )
         ],
         "end_turn",
@@ -56,12 +56,13 @@ async def test_partial_failure_flows_end_to_end_through_the_real_api(monkeypatch
                 json={
                     "issues": [
                         {
-                            "key": "PROJ-1",
+                            "key": "AL-1",
                             "fields": {
                                 "summary": "Fix null pointer",
                                 "priority": {"name": "Highest"},
                                 "status": {"name": "Open"},
                                 "duedate": None,
+                                "description": None,
                             },
                         }
                     ]
@@ -99,7 +100,7 @@ async def test_partial_failure_flows_end_to_end_through_the_real_api(monkeypatch
     jira_result = next(
         block for block in tool_result_blocks if block["tool_use_id"] == "call_1"
     )
-    assert "PROJ-1" in jira_result["content"]
+    assert "AL-1" in jira_result["content"]
     github_result = next(
         block for block in tool_result_blocks if block["tool_use_id"] == "call_2"
     )

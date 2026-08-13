@@ -1,8 +1,10 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+import slack_bolt.adapter.socket_mode.async_handler as async_handler_module
 
+import app.main as main_module
 from app.agent.orchestrator import OrchestratorUnavailable
 from app.core.models import AskResponse
 from app.main import app
@@ -64,3 +66,38 @@ async def test_health_returns_200_without_any_credentials(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+async def test_lifespan_never_touches_socket_mode_when_slack_not_configured(
+    monkeypatch,
+):
+    monkeypatch.setattr(main_module.settings, "slack_bot_token", None)
+    monkeypatch.setattr(main_module.settings, "slack_app_token", None)
+
+    mock_handler_cls = MagicMock()
+    monkeypatch.setattr(
+        async_handler_module, "AsyncSocketModeHandler", mock_handler_cls
+    )
+
+    async with main_module.lifespan(app):
+        pass
+
+    mock_handler_cls.assert_not_called()
+
+
+async def test_lifespan_connects_and_disconnects_socket_mode_when_configured(
+    monkeypatch,
+):
+    monkeypatch.setattr(main_module.settings, "slack_bot_token", "xoxb-test")
+    monkeypatch.setattr(main_module.settings, "slack_app_token", "xapp-test")
+
+    mock_handler_instance = AsyncMock()
+    mock_handler_cls = MagicMock(return_value=mock_handler_instance)
+    monkeypatch.setattr(
+        async_handler_module, "AsyncSocketModeHandler", mock_handler_cls
+    )
+
+    async with main_module.lifespan(app):
+        mock_handler_instance.connect_async.assert_awaited_once()
+
+    mock_handler_instance.disconnect_async.assert_awaited_once()

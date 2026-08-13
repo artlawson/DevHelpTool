@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     jira_project_key: str
     github_token: str
     github_username: str
+    slack_bot_token: str | None = None
+    slack_app_token: str | None = None
+    slack_channel_id: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env")
 

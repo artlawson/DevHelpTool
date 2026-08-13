@@ -5,7 +5,7 @@ from app.core.models import AskResponse, Issue, PullRequest, ToolResult
 
 def test_issue_model_constructs():
     issue = Issue(
-        key="PROJ-1",
+        key="AL-1",
         summary="Fix bug",
         priority="High",
         status="In Progress",
@@ -13,7 +13,7 @@ def test_issue_model_constructs():
         has_linked_pr=False,
         priority_score=3.0,
     )
-    assert issue.key == "PROJ-1"
+    assert issue.key == "AL-1"
     assert issue.due_date == date(2026, 1, 1)
 
 
@@ -21,7 +21,7 @@ def test_pull_request_model_constructs():
     pr = PullRequest(
         repo="org/repo",
         number=42,
-        title="Fix PROJ-1",
+        title="Fix AL-1",
         url="https://github.com/org/repo/pull/42",
         opened_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
         is_review_requested=True,

@@ -24,7 +24,7 @@ and design decisions behind it.
 ├── .env.example                  # documents required env vars; .env itself is gitignored
 │
 ├── app/
-│   ├── main.py                   # FastAPI app: POST /ask, GET /health
+│   ├── main.py                   # FastAPI app: POST /ask, GET /health; Slack lifespan hook
 │   ├── config.py                 # pydantic-settings Settings, loaded from .env
 │   ├── agent/
 │   │   ├── orchestrator.py       # hand-rolled Claude tool-calling loop
@@ -36,14 +36,24 @@ and design decisions behind it.
 │   ├── tools/
 │   │   ├── jira_tools.py         # get_my_high_priority_issues, get_issues_without_prs,
 │   │   │                         #   get_my_issues_with_linked_prs,
-│   │   │                         #   get_incomplete_issues_from_last_sprint
+│   │   │                         #   get_incomplete_issues_from_last_sprint,
+│   │   │                         #   get_current_sprint_issues,
+│   │   │                         #   get_lower_priority_issues_due_soon,
+│   │   │                         #   get_backlog_issues_needing_details
 │   │   └── github_tools.py       # get_my_open_prs, get_prs_awaiting_my_review
 │   ├── core/
 │   │   ├── models.py             # Issue, PullRequest, ToolResult[T], AskResponse
 │   │   ├── ranking.py            # score_issue(), score_pr() - pure, LLM-free
 │   │   ├── cache.py              # TTLCache (in-memory, injectable clock for tests)
 │   │   └── errors.py             # sanitize_error() - never leak raw exception text
+│   ├── slack/
+│   │   ├── bolt_app.py           # AsyncApp, app_mention handler (Socket Mode, @-mention path)
+│   │   ├── digest.py             # build_digest() - pure High Priority/Upcoming section logic
+│   │   └── formatting.py         # Issue/AskResponse -> Slack Block Kit
 │   └── tests/                    # pytest; all external HTTP mocked via respx
+│
+├── scripts/
+│   └── post_digest.py            # launchd-scheduled digest script - standalone, no FastAPI dependency
 │
 ├── specs/                        # technical spec + task breakdown for this project
 └── docs/ideation/                # research and design-decision history
@@ -85,6 +95,9 @@ Required variables (see `.env.example` for descriptions):
 - `ANTHROPIC_API_KEY`
 - `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY`
 - `GITHUB_TOKEN`, `GITHUB_USERNAME`
+
+Optional (Slack integration — the app runs identically to today if these are unset):
+- `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_CHANNEL_ID`
 
 ---
 
@@ -137,10 +150,23 @@ class ToolResult[T](BaseModel):
 # app/tools/*.py — the pattern every tool follows
 try:
     raw = await some_client.fetch(...)
+    mapped = [_map_issue(item) for item in raw]  # mapping stays inside the try
 except Exception as exc:
     return ToolResult(ok=False, data=None, error=sanitize_error(exc))
 return ToolResult(ok=True, data=mapped, error=None)
 ```
+
+The mapping step belongs *inside* the `try`, not after it — `_map_issue()` calls
+`score_issue()`, which does a dict lookup against a fixed set of priority names
+(`PRIORITY_WEIGHTS` in `app/core/ranking.py`). A Jira project using a non-standard priority
+scheme (`P0`–`P4`, custom names, etc.) raises `KeyError` from *inside* the mapping step, not
+from the HTTP call — if mapping happened after the `try`/`except`, that exception would
+propagate uncaught instead of degrading to `ToolResult(ok=False, ...)`. This was a real bug
+(caught in code review, not by the test suite, since every test mocks `search()` with
+well-formed fixture priorities) — the orchestrator's own `dispatch()` has a second layer of
+try/except that happened to mask it for `/ask`, but `scripts/post_digest.py` calls tool
+functions directly with no such safety net, so the bug was only exposed once a caller
+without that extra layer existed.
 
 `sanitize_error()` (`app/core/errors.py`) ensures only a status code/exception type reaches the
 client or the LLM — never a raw response body, which could contain sensitive data.
@@ -205,6 +231,44 @@ whose `endDate` has already passed but was never closed, and if found, surfaces 
 `ToolResult.note` (e.g. `Did you mean "Sprint 1"?`) — see the `note` field discussion under Error
 Handling above for how that reaches the model.
 
+`get_current_sprint_issues` is the active-sprint counterpart used by the Slack digest (below):
+same board-scan pattern, but against `get_active_sprints()` instead of `get_closed_sprints()`,
+unioning issues across every board with an active sprint (`sprint in (<id1>,<id2>,...)`). Unlike
+the closed-sprint case, an empty active-sprint list has exactly one meaning ("no sprint running
+right now"), so it returns a plain empty `ToolResult` with no `note`. **Live-testing gap:** the
+multi-board/multi-active-sprint union path is covered by mocked tests
+(`test_get_current_sprint_issues_unions_across_multiple_boards`) but unverified against a real
+Jira instance — this project's own Jira project has never had a sprint (closed or active) at
+all yet, the same live-testing limitation already noted for the "did you mean Sprint X" feature
+above.
+
+### Slack Integration
+
+Two independent entry points, neither of which changes `/ask`'s behavior:
+
+- **`app/slack/bolt_app.py`** (@-mention): a `slack_bolt.AsyncApp` running over Socket Mode
+  (no public HTTPS endpoint or tunnel needed) inside the same process as `uvicorn`, started from
+  `app/main.py`'s `lifespan` handler. `handle_mention` calls the existing
+  `orchestrator.handle_query()` directly — no HTTP round-trip to the app's own `/ask` route —
+  and replies in-thread. This whole module constructs a real `AsyncApp` at import time using
+  `settings.slack_bot_token`, which raises if the token is falsy; `app/main.py` only imports it
+  from inside the `if settings.slack_bot_token and settings.slack_app_token:` branch, specifically
+  so the app boots identically to today when Slack isn't configured (the import is never reached).
+- **`scripts/post_digest.py`** (scheduled digest): a standalone script, *not* triggered by
+  anything inside the long-running FastAPI process — it imports `app.tools.jira_tools` and
+  `app.slack.digest`/`formatting` directly and is meant to be run by `launchd` (see README's
+  Slack Integration section for the plist). This was a deliberate choice over an in-process
+  scheduler (e.g. APScheduler): the app isn't always-running today (`uvicorn --reload`, started
+  manually), so an in-process cron job would only fire the digest if the dev server happened to
+  be up at that hour — a standalone OS-scheduled script sidesteps that without turning the app
+  into an always-on daemon.
+- **`app/slack/digest.py:build_digest()`** is a pure function (no Slack/HTTP imports) that
+  decides the two-section (`High Priority` / `Upcoming`) content from five already-fetched issue
+  lists, with a fallback chain: real high-priority work → due-soon lower-priority work → an
+  explicit `"Nothing due soon"` empty state (never a silently-missing section, same
+  anti-ambiguity principle as `ToolResult.note` above). `app/slack/formatting.py` renders that
+  into Slack Block Kit bullets.
+
 ---
 
 ## Troubleshooting
@@ -253,6 +317,20 @@ detail (by design — see `sanitize_error()`):**
   `Issue`, verify against a live call (`curl localhost:8000/ask ...` with real credentials), not
   just the mocked test suite.
 
+**The daily Slack digest doesn't seem to be posting, or posted once and then stopped:**
+- `launchd` plists (per the README's Slack Integration section) live in
+  `~/Library/LaunchAgents/`. Confirm the job is actually loaded:
+  `launchctl list | grep com.devhelptool.digest` — no output means it isn't loaded
+  (`launchctl load ~/Library/LaunchAgents/com.devhelptool.digest.plist`).
+- Check the log file the plist's `StandardOutPath`/`StandardErrorPath` point at — every run
+  (success or failure) logs there, including `scripts/post_digest.py`'s own error logging for a
+  missing `SLACK_CHANNEL_ID`/`SLACK_BOT_TOKEN` or a failed `chat.postMessage` call.
+- A missing or incorrect `SLACK_CHANNEL_ID` doesn't crash silently — `post_digest.py` exits
+  non-zero with a explicit "must both be set" error before ever calling Slack, specifically so
+  an unattended, `launchd`-triggered run never looks identical to "ran fine, nothing to report."
+- The script has no retry logic by design (see `CLAUDE.md`'s Slack Integration section) — a
+  failed run just waits for `launchd`'s next scheduled trigger the following day.
+
 ---
 
 ## Dependencies
@@ -262,6 +340,8 @@ Runtime (see `pyproject.toml` for the authoritative list):
 - `anthropic` — Claude API client, used only in `app/agent/`
 - `httpx` — async HTTP client for Jira/GitHub, used only in `app/clients/`
 - `pydantic` + `pydantic-settings` — data models and `.env`-backed settings
+- `slack-bolt` + `aiohttp` — Slack Socket Mode app and its async transport, used only in
+  `app/slack/` and `scripts/post_digest.py`
 
 Dev only:
 - `pytest` + `pytest-asyncio` — test runner

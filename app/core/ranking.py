@@ -26,9 +26,13 @@ OVERDUE_BONUS: float = 1.5
 HIGH_PRIORITY_THRESHOLD: float = PRIORITY_WEIGHTS["High"]
 
 
+def is_overdue(due_date: date | None) -> bool:
+    return due_date is not None and due_date < datetime.now(UTC).date()
+
+
 def score_issue(issue: RawIssue) -> float:
     score = PRIORITY_WEIGHTS[issue.priority]
-    if issue.due_date and issue.due_date < datetime.now(UTC).date():
+    if is_overdue(issue.due_date):
         score += OVERDUE_BONUS
     return score
 

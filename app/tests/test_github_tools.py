@@ -6,7 +6,7 @@ from app.tools import github_tools
 
 RAW_PR = {
     "number": 42,
-    "title": "Fix PROJ-1",
+    "title": "Fix AL-1",
     "html_url": "https://github.com/org/repo/pull/42",
     "repository_url": "https://api.github.com/repos/org/repo",
     "created_at": "2026-01-01T12:00:00Z",
