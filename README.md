@@ -1,6 +1,6 @@
 # Engineering Productivity Agent
 
-A local FastAPI service that answers natural-language questions about your current engineering work — "what should I work on today?", "which high-priority Jira tickets don't have PRs?", "what's awaiting my review?" — by orchestrating a hand-rolled Claude tool-calling loop over the Jira and GitHub REST APIs.
+A local FastAPI service that answers natural-language questions about your current engineering work — "what should I work on today?", "which high-priority Jira tickets don't have PRs?", "which of my tickets already have a matching PR?", "what's awaiting my review?" — by orchestrating a hand-rolled Claude tool-calling loop over the Jira and GitHub REST APIs.
 
 Data is fetched and deterministically ranked in Python (priority, due date, review-request age); Claude's role is limited to deciding which tools to call and narrating the final answer — it never decides what's "important."
 
@@ -54,6 +54,7 @@ cp .env.example .env
 | `JIRA_BASE_URL` | Your Jira Cloud instance, e.g. `https://your-domain.atlassian.net` |
 | `JIRA_EMAIL` | Email of the Jira account tied to the API token |
 | `JIRA_API_TOKEN` | Jira API token (Basic Auth) — [create one here](https://id.atlassian.com/manage-profile/security/api-tokens) |
+| `JIRA_PROJECT_KEY` | Your Jira project key, e.g. `AL` — scopes Agile board/sprint lookups to your project |
 | `GITHUB_TOKEN` | Fine-grained GitHub PAT, scoped to the repos you want monitored |
 | `GITHUB_USERNAME` | Your GitHub username, used to build `author:`/`review-requested:` queries |
 
@@ -72,7 +73,7 @@ curl -X POST localhost:8000/ask \
 ```json
 {
   "answer": "You have 2 high-priority tickets without PRs: PROJ-123 and PROJ-140. You also have 1 PR awaiting your review: org/repo#42.",
-  "tool_calls": ["jira.get_my_high_priority_issues", "jira.get_issues_without_prs", "github.get_prs_awaiting_my_review"],
+  "tool_calls": ["jira_get_my_high_priority_issues", "jira_get_issues_without_prs", "github_get_prs_awaiting_my_review"],
   "warnings": []
 }
 ```

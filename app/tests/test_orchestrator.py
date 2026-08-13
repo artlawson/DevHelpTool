@@ -53,6 +53,47 @@ async def test_loop_dispatches_tool_and_produces_final_answer(monkeypatch):
     mock_tool.assert_awaited_once()
 
 
+async def test_tool_result_note_is_forwarded_to_the_model(monkeypatch):
+    tool_use = FakeToolUseBlock(
+        "call_1", "jira_get_incomplete_issues_from_last_sprint"
+    )
+    first_response = FakeResponse([tool_use], "tool_use")
+    final_response = FakeResponse([FakeTextBlock("No closed sprint yet.")], "end_turn")
+
+    # `messages` is mutated in place across iterations (see CLAUDE.md
+    # troubleshooting) - capture a shallow copy per call instead of relying
+    # on await_args_list, which would only ever show the final state.
+    captured_messages_per_call: list[list] = []
+
+    async def fake_create(**kwargs):
+        captured_messages_per_call.append(list(kwargs["messages"]))
+        if len(captured_messages_per_call) == 1:
+            return first_response
+        return final_response
+
+    monkeypatch.setattr(orchestrator.anthropic_client.messages, "create", fake_create)
+
+    mock_tool = AsyncMock(
+        return_value=ToolResult(
+            ok=True,
+            data=[],
+            error=None,
+            note='Did you mean "Sprint 1"?',
+        )
+    )
+    monkeypatch.setitem(
+        orchestrator.TOOL_REGISTRY,
+        "jira_get_incomplete_issues_from_last_sprint",
+        mock_tool,
+    )
+
+    await orchestrator.handle_query("what's incomplete from last sprint?")
+
+    second_call_messages = captured_messages_per_call[1]
+    tool_result_content = second_call_messages[-1]["content"][0]["content"]
+    assert "Sprint 1" in tool_result_content
+
+
 async def test_failing_tool_produces_warning_and_loop_continues(monkeypatch):
     tool_use_1 = FakeToolUseBlock("call_1", "jira_get_my_high_priority_issues")
     tool_use_2 = FakeToolUseBlock("call_2", "github_get_my_open_prs")

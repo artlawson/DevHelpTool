@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     jira_base_url: str
     jira_email: str
     jira_api_token: str
+    jira_project_key: str
     github_token: str
     github_username: str
 

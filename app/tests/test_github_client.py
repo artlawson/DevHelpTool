@@ -14,6 +14,7 @@ def settings() -> Settings:
         jira_base_url="x",
         jira_email="x",
         jira_api_token="x",
+        jira_project_key="x",
         github_token="gh-token",
         github_username="octocat",
     )

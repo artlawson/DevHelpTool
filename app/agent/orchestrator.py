@@ -43,14 +43,14 @@ def extract_text(content: list[Any]) -> str:
     return "".join(block.text for block in content if block.type == "text")
 
 
-def _serialize_tool_data(data: Any) -> str:
+def _serialize_tool_data(data: Any) -> Any:
     """Tool results are typically list[BaseModel] (e.g. list[Issue]); handle
-    that shape explicitly since a list itself has no model_dump_json()."""
+    that shape explicitly since a list itself has no model_dump()."""
     if isinstance(data, list):
-        return json.dumps([item.model_dump(mode="json") for item in data])
+        return [item.model_dump(mode="json") for item in data]
     if isinstance(data, BaseModel):
-        return data.model_dump_json()
-    return json.dumps(data)
+        return data.model_dump(mode="json")
+    return data
 
 
 async def dispatch(block: Any, called_tools: list[str], warnings: list[str]) -> dict:
@@ -77,8 +77,14 @@ async def dispatch(block: Any, called_tools: list[str], warnings: list[str]) -> 
         }
 
     called_tools.append(block.name)
-    content = _serialize_tool_data(result.data)
-    return {"type": "tool_result", "tool_use_id": block.id, "content": content}
+    payload = _serialize_tool_data(result.data)
+    if result.note:
+        payload = {"data": payload, "note": result.note}
+    return {
+        "type": "tool_result",
+        "tool_use_id": block.id,
+        "content": json.dumps(payload),
+    }
 
 
 async def handle_query(query: str) -> AskResponse:

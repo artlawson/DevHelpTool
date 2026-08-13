@@ -34,7 +34,9 @@ and design decisions behind it.
 │   │   ├── jira_client.py        # thin httpx wrapper: auth, JQL search, TTL cache
 │   │   └── github_client.py      # thin httpx wrapper: auth, search_prs(), TTL cache
 │   ├── tools/
-│   │   ├── jira_tools.py         # get_my_high_priority_issues, get_issues_without_prs
+│   │   ├── jira_tools.py         # get_my_high_priority_issues, get_issues_without_prs,
+│   │   │                         #   get_my_issues_with_linked_prs,
+│   │   │                         #   get_incomplete_issues_from_last_sprint
 │   │   └── github_tools.py       # get_my_open_prs, get_prs_awaiting_my_review
 │   ├── core/
 │   │   ├── models.py             # Issue, PullRequest, ToolResult[T], AskResponse
@@ -81,7 +83,7 @@ cp .env.example .env
 
 Required variables (see `.env.example` for descriptions):
 - `ANTHROPIC_API_KEY`
-- `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`
+- `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY`
 - `GITHUB_TOKEN`, `GITHUB_USERNAME`
 
 ---
@@ -128,6 +130,7 @@ class ToolResult[T](BaseModel):
     ok: bool
     data: T | None
     error: str | None
+    note: str | None = None  # optional, ok=True-only context - see below
 ```
 
 ```python
@@ -141,6 +144,14 @@ return ToolResult(ok=True, data=mapped, error=None)
 
 `sanitize_error()` (`app/core/errors.py`) ensures only a status code/exception type reaches the
 client or the LLM — never a raw response body, which could contain sensitive data.
+
+`note` is for a different case than `error`: still `ok=True` (not a failure), but the tool has
+extra context the raw `data` can't express — e.g. "empty list because X, not because everything's
+done." `app/agent/orchestrator.py:dispatch()` only forwards `result.data` to Claude by default; if
+`result.note` is set, it wraps the payload as `{"data": ..., "note": ...}` instead of sending the
+bare array/object, specifically so the model doesn't have to guess at an ambiguous empty result.
+Only set this when `data` alone is genuinely ambiguous — don't use it as a general "extra info"
+channel.
 
 ### Async Operations
 
@@ -160,6 +171,39 @@ results = await asyncio.gather(
 `TTLCache` (default 60s), keyed on the query string. `GitHubClient` is a single shared
 singleton (`app/tools/github_tools.py:github_client`, imported by `jira_tools.py` too) so the
 cache is actually shared across both tool modules rather than duplicated.
+
+### Issue ↔ PR Linking
+
+Jira issues are matched to GitHub PRs by literal issue-key text, not by any structured field:
+`_ISSUE_KEY_PATTERN` (`app/tools/jira_tools.py`) is `[A-Z]+-\d+`, run against each PR's
+title+body via `_fetch_raw_prs_by_issue_key()`. A PR is considered linked to `AL-3` if the
+substring `AL-3` appears anywhere in its title or body — parens, brackets, or bare, doesn't
+matter.
+
+Because of this, matching only works if your Jira project's *actual issue key* matches what
+you write in PR titles. If you want PRs labeled `(AL-<n>) ...` to link up, your Jira project key
+needs to literally be `AL` (Project settings → Details → Key, in Jira Cloud) — there's no
+separate summary-text-parsing path. `get_my_issues_with_linked_prs` surfaces the matched PR
+(`Issue.linked_pr`); `get_issues_without_prs` uses the same matching to filter, but only ever
+returns `has_linked_pr=False` issues (it never populates `linked_pr`).
+
+### Sprint Lookups
+
+`get_incomplete_issues_from_last_sprint` uses Jira's Agile REST API (`/rest/agile/1.0/...`),
+not the plain issue-search API used everywhere else: `JiraClient.get_boards()` (scoped by
+`JIRA_PROJECT_KEY`) → `get_closed_sprints(board_id)` for each board → picks the sprint with the
+latest `completeDate`/`endDate` → JQL `sprint = <id> AND assignee = currentUser() AND
+resolution = Unresolved`. This only works for Scrum boards — Kanban boards have no sprint
+concept, so `get_closed_sprints` returns an empty list for them and the tool falls back to an
+empty (not error) result. Board/sprint responses are cached in the same `TTLCache` instance as
+`search()`, keyed by `"boards:<project_key>"` / `"sprints:<state>:<board_id>"`.
+
+When there's no closed sprint at all (nothing to formally report on), the tool doesn't just
+return an empty list silently — an empty result is genuinely ambiguous (no sprint ever closed,
+vs. a sprint closed with nothing left incomplete). It checks `get_active_sprints()` for a sprint
+whose `endDate` has already passed but was never closed, and if found, surfaces it via
+`ToolResult.note` (e.g. `Did you mean "Sprint 1"?`) — see the `note` field discussion under Error
+Handling above for how that reaches the model.
 
 ---
 
@@ -188,6 +232,26 @@ or reload-loops on package files like `fastapi/__init__.py`:**
   `AsyncMock`'s recorded call args are references, not snapshots, so every recorded call ends
   up showing the *final* state of the list. Capture a shallow copy inside a custom
   `side_effect`/fake function instead (see `app/tests/test_integration.py` for the pattern).
+
+**`/ask` returns 503 "assistant temporarily unavailable", with the real error logged as
+`tools.0.custom.name: String should match pattern '^[a-zA-Z0-9_-]{1,128}$'`:**
+- A tool name in `app/agent/schemas.py`/`registry.py` contains a character Claude's tool-calling
+  API rejects — most notably `.`. Tool names here are `snake_case` (`jira_get_...`,
+  `github_get_...`), not dotted namespaces, specifically because of this constraint. This class
+  of bug is invisible in the test suite (`test_orchestrator.py`/`test_integration.py` mock the
+  Anthropic client entirely) — it only surfaces on a real `/ask` call against the live API.
+
+**A tool call fails with a warning like `jira_get_...: KeyError: request failed`, with no other
+detail (by design — see `sanitize_error()`):**
+- Likely a Jira/GitHub response shape mismatch, not a real network failure. In particular:
+  Jira Cloud's `/rest/api/3/search/jql` endpoint (the current, non-deprecated search endpoint)
+  returns bare `{"id": "..."}` issue objects — no `key`, no `fields` — unless the request
+  explicitly passes a `fields` param (see `_ISSUE_FIELDS` in `app/clients/jira_client.py`). This
+  is real Atlassian API behavior, not a bug in this codebase's assumptions about Jira — but
+  since every test mocks `JiraClient.search()` at the boundary, no test would catch a mismatch
+  between the mocked shape and what Jira actually returns. When adding new Jira fields to
+  `Issue`, verify against a live call (`curl localhost:8000/ask ...` with real credentials), not
+  just the mocked test suite.
 
 ---
 

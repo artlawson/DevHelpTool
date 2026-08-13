@@ -165,6 +165,103 @@ async def test_get_my_issues_with_linked_prs_returns_error_when_github_fails(
     assert result.error is not None
 
 
+async def test_get_incomplete_issues_from_last_sprint_picks_most_recent_sprint(
+    monkeypatch,
+):
+    mock_get_boards = AsyncMock(return_value=[{"id": 1}])
+    mock_get_sprints = AsyncMock(
+        return_value=[
+            {"id": 10, "completeDate": "2026-07-20T00:00:00.000Z"},
+            {"id": 11, "completeDate": "2026-08-03T00:00:00.000Z"},
+        ]
+    )
+    mock_search = AsyncMock(return_value=[RAW_ISSUE])
+    monkeypatch.setattr(jira_tools.jira_client, "get_boards", mock_get_boards)
+    monkeypatch.setattr(jira_tools.jira_client, "get_closed_sprints", mock_get_sprints)
+    monkeypatch.setattr(jira_tools.jira_client, "search", mock_search)
+
+    result = await jira_tools.get_incomplete_issues_from_last_sprint()
+
+    assert result.ok is True
+    assert result.data is not None
+    assert [i.key for i in result.data] == ["PROJ-1"]
+    (jql,), _ = mock_search.call_args
+    assert "sprint = 11" in jql
+    assert "assignee = currentUser()" in jql
+
+
+async def test_get_incomplete_issues_from_last_sprint_returns_empty_when_no_sprints(
+    monkeypatch,
+):
+    mock_get_boards = AsyncMock(return_value=[{"id": 1}])
+    mock_get_closed = AsyncMock(return_value=[])
+    mock_get_active = AsyncMock(return_value=[])
+    monkeypatch.setattr(jira_tools.jira_client, "get_boards", mock_get_boards)
+    monkeypatch.setattr(jira_tools.jira_client, "get_closed_sprints", mock_get_closed)
+    monkeypatch.setattr(jira_tools.jira_client, "get_active_sprints", mock_get_active)
+
+    result = await jira_tools.get_incomplete_issues_from_last_sprint()
+
+    assert result.ok is True
+    assert result.data == []
+    assert result.note is None
+
+
+async def test_get_incomplete_issues_from_last_sprint_suggests_overdue_active_sprint(
+    monkeypatch,
+):
+    mock_get_boards = AsyncMock(return_value=[{"id": 1}])
+    mock_get_closed = AsyncMock(return_value=[])
+    mock_get_active = AsyncMock(
+        return_value=[
+            {"id": 20, "name": "Sprint 1", "endDate": "2020-01-01T00:00:00.000Z"}
+        ]
+    )
+    monkeypatch.setattr(jira_tools.jira_client, "get_boards", mock_get_boards)
+    monkeypatch.setattr(jira_tools.jira_client, "get_closed_sprints", mock_get_closed)
+    monkeypatch.setattr(jira_tools.jira_client, "get_active_sprints", mock_get_active)
+
+    result = await jira_tools.get_incomplete_issues_from_last_sprint()
+
+    assert result.ok is True
+    assert result.data == []
+    assert result.note is not None
+    assert "Sprint 1" in result.note
+
+
+async def test_get_incomplete_issues_from_last_sprint_no_note_when_sprint_not_overdue(
+    monkeypatch,
+):
+    mock_get_boards = AsyncMock(return_value=[{"id": 1}])
+    mock_get_closed = AsyncMock(return_value=[])
+    mock_get_active = AsyncMock(
+        return_value=[
+            {"id": 21, "name": "Sprint 2", "endDate": "2099-01-01T00:00:00.000Z"}
+        ]
+    )
+    monkeypatch.setattr(jira_tools.jira_client, "get_boards", mock_get_boards)
+    monkeypatch.setattr(jira_tools.jira_client, "get_closed_sprints", mock_get_closed)
+    monkeypatch.setattr(jira_tools.jira_client, "get_active_sprints", mock_get_active)
+
+    result = await jira_tools.get_incomplete_issues_from_last_sprint()
+
+    assert result.ok is True
+    assert result.data == []
+    assert result.note is None
+
+
+async def test_get_incomplete_issues_from_last_sprint_returns_error_on_failure(
+    monkeypatch,
+):
+    mock_get_boards = AsyncMock(side_effect=RuntimeError("500 Internal Server Error"))
+    monkeypatch.setattr(jira_tools.jira_client, "get_boards", mock_get_boards)
+
+    result = await jira_tools.get_incomplete_issues_from_last_sprint()
+
+    assert result.ok is False
+    assert result.error is not None
+
+
 async def test_neither_tool_module_imports_anthropic():
     import ast
     import inspect

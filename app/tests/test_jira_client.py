@@ -14,6 +14,7 @@ def settings() -> Settings:
         jira_base_url="https://example.atlassian.net",
         jira_email="me@example.com",
         jira_api_token="jira-token",
+        jira_project_key="TEST",
         github_token="x",
         github_username="x",
     )
@@ -95,5 +96,92 @@ async def test_search_refetches_after_ttl_expires(settings: Settings):
     await client.search("assignee = currentUser()")
     fake_time[0] += 11
     await client.search("assignee = currentUser()")
+
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_get_boards_sends_get_scoped_to_project(settings: Settings):
+    route = respx.get("https://example.atlassian.net/rest/agile/1.0/board").mock(
+        return_value=httpx.Response(
+            200, json={"values": [{"id": 1, "name": "Board 1"}]}
+        )
+    )
+
+    client = JiraClient(settings)
+    boards = await client.get_boards()
+
+    assert boards == [{"id": 1, "name": "Board 1"}]
+    request = route.calls[0].request
+    assert request.url.params["projectKeyOrId"] == "TEST"
+
+
+@respx.mock
+async def test_get_boards_uses_cache(settings: Settings):
+    route = respx.get("https://example.atlassian.net/rest/agile/1.0/board").mock(
+        return_value=httpx.Response(200, json={"values": []})
+    )
+
+    client = JiraClient(settings, cache=TTLCache(ttl_seconds=60))
+    await client.get_boards()
+    await client.get_boards()
+
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_get_closed_sprints_sends_get_with_state_param(settings: Settings):
+    route = respx.get("https://example.atlassian.net/rest/agile/1.0/board/1/sprint").mock(
+        return_value=httpx.Response(
+            200, json={"values": [{"id": 5, "name": "Sprint 1"}]}
+        )
+    )
+
+    client = JiraClient(settings)
+    sprints = await client.get_closed_sprints(1)
+
+    assert sprints == [{"id": 5, "name": "Sprint 1"}]
+    request = route.calls[0].request
+    assert request.url.params["state"] == "closed"
+
+
+@respx.mock
+async def test_get_closed_sprints_uses_cache(settings: Settings):
+    route = respx.get(
+        "https://example.atlassian.net/rest/agile/1.0/board/1/sprint"
+    ).mock(return_value=httpx.Response(200, json={"values": []}))
+
+    client = JiraClient(settings, cache=TTLCache(ttl_seconds=60))
+    await client.get_closed_sprints(1)
+    await client.get_closed_sprints(1)
+
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_get_active_sprints_sends_get_with_state_param(settings: Settings):
+    route = respx.get("https://example.atlassian.net/rest/agile/1.0/board/1/sprint").mock(
+        return_value=httpx.Response(
+            200, json={"values": [{"id": 9, "name": "Sprint 2"}]}
+        )
+    )
+
+    client = JiraClient(settings)
+    sprints = await client.get_active_sprints(1)
+
+    assert sprints == [{"id": 9, "name": "Sprint 2"}]
+    request = route.calls[0].request
+    assert request.url.params["state"] == "active"
+
+
+@respx.mock
+async def test_closed_and_active_sprints_do_not_share_a_cache_key(settings: Settings):
+    route = respx.get("https://example.atlassian.net/rest/agile/1.0/board/1/sprint").mock(
+        return_value=httpx.Response(200, json={"values": []})
+    )
+
+    client = JiraClient(settings, cache=TTLCache(ttl_seconds=60))
+    await client.get_closed_sprints(1)
+    await client.get_active_sprints(1)
 
     assert route.call_count == 2

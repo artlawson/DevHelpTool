@@ -29,6 +29,7 @@ class ToolResult[T](BaseModel):
     ok: bool
     data: T | None
     error: str | None
+    note: str | None = None
 
 
 class AskResponse(BaseModel):

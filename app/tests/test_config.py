@@ -13,6 +13,7 @@ def test_settings_loads_all_fields_from_env(monkeypatch, tmp_path):
         "JIRA_BASE_URL",
         "JIRA_EMAIL",
         "JIRA_API_TOKEN",
+        "JIRA_PROJECT_KEY",
         "GITHUB_TOKEN",
         "GITHUB_USERNAME",
     ):
@@ -24,6 +25,7 @@ def test_settings_loads_all_fields_from_env(monkeypatch, tmp_path):
         "JIRA_BASE_URL=https://example.atlassian.net\n"
         "JIRA_EMAIL=me@example.com\n"
         "JIRA_API_TOKEN=jira-token\n"
+        "JIRA_PROJECT_KEY=AL\n"
         "GITHUB_TOKEN=gh-token\n"
         "GITHUB_USERNAME=octocat\n"
     )
@@ -34,6 +36,7 @@ def test_settings_loads_all_fields_from_env(monkeypatch, tmp_path):
     assert settings.jira_base_url == "https://example.atlassian.net"
     assert settings.jira_email == "me@example.com"
     assert settings.jira_api_token == "jira-token"
+    assert settings.jira_project_key == "AL"
     assert settings.github_token == "gh-token"
     assert settings.github_username == "octocat"
 

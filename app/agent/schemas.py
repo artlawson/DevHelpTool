@@ -25,6 +25,15 @@ TOOL_SCHEMAS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "jira_get_incomplete_issues_from_last_sprint",
+        "description": (
+            "Fetch the current user's unresolved Jira issues from the most "
+            "recently closed sprint on their project's board(s) - i.e. "
+            "what's still incomplete from last sprint."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "github_get_my_open_prs",
         "description": "Fetch the current user's open, authored GitHub pull requests.",
         "input_schema": {"type": "object", "properties": {}},
