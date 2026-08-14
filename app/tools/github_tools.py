@@ -60,3 +60,27 @@ async def get_prs_awaiting_my_review() -> ToolResult[list[PullRequest]]:
         data=[to_pull_request(item, is_review_requested=True) for item in raw],
         error=None,
     )
+
+
+# Digest-only (not in TOOL_REGISTRY/TOOL_SCHEMAS - same pattern as
+# jira_tools.get_current_sprint_issues etc.), since it's discovery for the
+# scheduled digest, not something the /ask orchestrator needs to call on demand.
+# Scoped to a single repo (settings.github_repo) rather than an org-wide or
+# unscoped search, which would otherwise match essentially all of public GitHub -
+# skips the search entirely (empty result, not an error) if unset, so this
+# stays optional the same way Slack's settings are.
+async def get_prs_i_could_review() -> ToolResult[list[PullRequest]]:
+    if not settings.github_repo:
+        return ToolResult(ok=True, data=[], error=None)
+
+    query = (
+        f"is:pr is:open repo:{settings.github_repo} "
+        f"-author:{settings.github_username} "
+        f"-review-requested:{settings.github_username}"
+    )
+    try:
+        raw = await github_client.search_prs(query)
+    except Exception as exc:
+        return ToolResult(ok=False, data=None, error=sanitize_error(exc))
+
+    return ToolResult(ok=True, data=[to_pull_request(item) for item in raw], error=None)

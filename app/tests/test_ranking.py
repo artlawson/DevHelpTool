@@ -1,6 +1,14 @@
 from datetime import UTC, date, datetime, timedelta
 
-from app.core.ranking import RawIssue, RawPR, is_overdue, rank, score_issue, score_pr
+from app.core.ranking import (
+    RawIssue,
+    RawPR,
+    is_overdue,
+    is_urgent,
+    rank,
+    score_issue,
+    score_pr,
+)
 
 
 def test_is_overdue_true_for_past_due_date():
@@ -45,6 +53,21 @@ def test_pr_score_increases_monotonically_with_age():
     older = RawPR(opened_at=now - timedelta(days=10), is_review_requested=False)
 
     assert score_pr(older) > score_pr(younger)
+
+
+def test_is_urgent_true_for_high_and_highest_priority():
+    assert is_urgent("High", None) is True
+    assert is_urgent("Highest", None) is True
+
+
+def test_is_urgent_true_for_overdue_regardless_of_priority():
+    assert is_urgent("Low", date(2020, 1, 1)) is True
+    assert is_urgent("Lowest", date(2020, 1, 1)) is True
+
+
+def test_is_urgent_false_for_medium_or_lower_not_overdue():
+    assert is_urgent("Medium", None) is False
+    assert is_urgent("Low", date(2999, 1, 1)) is False
 
 
 def test_rank_sorts_descending_by_score():

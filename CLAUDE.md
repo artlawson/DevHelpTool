@@ -98,6 +98,8 @@ Required variables (see `.env.example` for descriptions):
 
 Optional (Slack integration — the app runs identically to today if these are unset):
 - `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_CHANNEL_ID`
+- `GITHUB_REPO` (`"owner/repo"`) — scopes the digest's "PRs You Could Review" search; that
+  section is simply skipped (not an error) if unset.
 
 ---
 
@@ -170,6 +172,13 @@ without that extra layer existed.
 
 `sanitize_error()` (`app/core/errors.py`) ensures only a status code/exception type reaches the
 client or the LLM — never a raw response body, which could contain sensitive data.
+
+`unwrap_tool_result()` (also `app/core/errors.py`) is for callers that invoke a tool function
+directly instead of through the orchestrator's `dispatch()` — `scripts/post_digest.py` and
+`app/slack/bolt_app.py`'s standup-summary action handler, both of which have no LLM to hand a
+warning to the way `dispatch()` does. It logs the failure and degrades to `[]` instead of
+raising, generic over the list element type (`ToolResult[list[T]] -> list[T]`) since both
+callers use it for both `Issue` and `PullRequest` results.
 
 `note` is for a different case than `error`: still `ok=True` (not a failure), but the tool has
 extra context the raw `data` can't express — e.g. "empty list because X, not because everything's
@@ -268,6 +277,94 @@ Two independent entry points, neither of which changes `/ask`'s behavior:
   explicit `"Nothing due soon"` empty state (never a silently-missing section, same
   anti-ambiguity principle as `ToolResult.note` above). `app/slack/formatting.py` renders that
   into Slack Block Kit bullets.
+- **Digest Quick Links buttons** (`app/slack/formatting.py:_issue_actions_block`): each
+  High Priority issue gets its own `section` + `actions` block pair (`Open in Jira`, plus
+  `View PR #<n>` when linked), not one shared block for the whole section — Slack has no way
+  to attach a button row to a single line inside a combined text block, which is why
+  `_high_priority_blocks` emits per-issue pairs while `_upcoming_blocks` (lower emphasis,
+  no buttons) still emits one combined block. `url`-type buttons make Slack open the link
+  client-side regardless of the app's response, but Slack still POSTs the interaction and
+  expects an ack within 3s or the user sees an error toast — `bolt_app.py` registers a
+  shared `_ack_only` handler for `digest_open_jira`/`digest_view_pr` (and
+  `ask_standup_dismiss`, below) purely to satisfy that.
+- **Standup summary** (`app/slack/digest.py:build_standup_summary`,
+  `app/slack/formatting.py:format_standup_summary`): every `/ask`/@-mention reply
+  (`format_ask_response`) unconditionally appends a "want a succinct standup summary?"
+  prompt with two buttons — never inferred from the question text (asking is the point;
+  "what should I work on today" must not be assumed to mean "give me a standup summary").
+  Clicking `ask_standup_summary` (handled in `bolt_app.py`) bypasses the LLM/orchestrator
+  entirely — it calls `jira_tools.get_my_issues_with_linked_prs()` (not
+  `get_my_high_priority_issues()` — the PR-annotated tool, specifically so a "Doing" issue's
+  still-open PR comes along with it) and `github_tools.get_prs_awaiting_my_review()`
+  directly, then posts a reply in the same thread. Buttons over free text was a deliberate
+  choice: a free-text follow-up ("yes, give me the short version") would need thread-scoped
+  conversation memory (`thread_ts` → prior messages), which nothing in this codebase has — a
+  button click carries enough intent on its own, no memory required. Three sections:
+  `Doing` (issues from that fetch filtered to High/Highest priority — uncapped, so someone
+  with 6 high-priority issues in flight sees all 6, not a truncated 4), `Reviewing` (PRs
+  awaiting review, unchanged), `Next Up` (backfilled from the same ranked fetch, excluding
+  whatever's already in `Doing`, only when `Doing + Reviewing` together total fewer than 2 -
+  keeps a thin day from reading as a single bare bullet without padding a busy one). No tool
+  currently tracks "completed since yesterday," so there's no `Done` section.
+- **`/ask` answer enrichment** (`app/slack/formatting.py:format_ask_response`): the
+  orchestrator's `SYSTEM_PROMPT` instructs Claude to write Slack mrkdwn directly (single-
+  asterisk bold, `•` bullets, no markdown links) and to lead with a bolded `*Focus: ...*`
+  line when there's one clear next action — but LLM instruction-following isn't a
+  guarantee, so `format_ask_response` runs a deterministic pass over `response.answer`
+  regardless of what the model wrote: `_sanitize_markdown_for_slack` normalizes stray
+  standard-Markdown (`**bold**`, `# headers`, `- bullets`, `[text](url)`) to Slack mrkdwn,
+  then `_hyperlink_prs`/`_hyperlink_and_flag_issues` turn `"PR #514"`/`"AL-12"` mentions into
+  real links using `AskResponse.referenced_issues`/`referenced_prs` — every `Issue`/
+  `PullRequest` actually returned by a tool call this turn, collected by
+  `orchestrator.py:_record_referenced_data` inside `dispatch()` and threaded through
+  `AskResponse`, **never** derived by parsing the answer text itself. A ticket/PR mentioned
+  but not fetched this turn is left as plain text rather than linked to a guessed URL.
+  **Gotcha:** an issue key can appear *inside* an already-built link's URL (e.g.
+  `.../browse/AL-12`, or a markdown link the sanitizer just converted) — naively
+  regex-substituting over the whole string produces broken nested `<...<...>...>` markup.
+  `_apply_outside_existing_links` splits on existing `<...>` spans and only transforms the
+  text between them; both hyperlinking passes go through it. This was caught by manual
+  testing against a real answer shape, not the unit test suite — worth remembering when
+  adding any future text-substitution pass here.
+- **Priority emoji** (`app/slack/formatting.py:_priority_emoji`): three-tier, not a
+  per-priority-name gradient — 🔴 for High/Highest priority *or* anything overdue, 🟡 for
+  Medium, 🟢 for everything else (including any non-standard priority name, falling back
+  rather than raising - same principle `PRIORITY_WEIGHTS` should follow but doesn't, per the
+  KeyError gotcha above). Shared by the digest, the standup summary, and `/ask` issue
+  mentions. One exception: `_high_priority_blocks` forces 🔴 unconditionally regardless of
+  an issue's actual priority field, since membership in that digest section already means
+  "high priority OR due soon" by `build_digest`'s own fallback chain (above) - a
+  Medium-priority issue that landed there via the due-soon path should still read as urgent.
+- Both `/ask`/@-mention and the digest's buttons require **Interactivity & Shortcuts** to be
+  toggled on for the Slack app (separate from Socket Mode, no Request URL needed) - without
+  it, every button silently does nothing when clicked, since Slack won't deliver
+  `block_actions` payloads to the socket connection at all.
+- Unnumbered issue bullets (`_upcoming_blocks`, standup summary's `Doing`/`Next Up`) use the
+  priority emoji itself as the bullet, not a separate `"•"` alongside it — see
+  `_issue_bullet`'s `prefix` logic. Numbered lists (digest `High Priority`) keep the number;
+  PR bullets (`_pr_bullet`) always keep `"•"` since PRs never carry a priority emoji.
+- **PRs You Could Review** (`app/tools/github_tools.py:get_prs_i_could_review`,
+  digest-only — not in `TOOL_REGISTRY`/`TOOL_SCHEMAS`, same as the other digest-only Jira
+  tools): open PRs in `settings.github_repo` (`"owner/repo"`, optional) not authored by the
+  user and not already review-requested from them — a proactive-review discovery section,
+  distinct from `get_prs_awaiting_my_review` (explicit review requests). Skips the search
+  entirely (`ok=True, data=[]`, not an error) when `github_repo` is unset, same
+  optional-feature pattern as Slack's own settings. `format_digest`'s
+  `_prs_to_review_blocks` omits the section entirely when empty, unlike `High
+  Priority`/`Upcoming` — this is supplementary content, not one of the two core sections the
+  original anti-ambiguity design applies to.
+- **`/ask` first-mention vs. subsequent-mention linking**
+  (`formatting.py:_hyperlink_and_flag_issues`): the *first* time an answer mentions a given
+  issue key, both the key and its title get linked (two separate `<url|text>` spans, e.g.
+  `🔴 <url|AL-12> <url|Fix auth bug>`); every mention after that links just the bare key, no
+  emoji or repeated title. Tracked via a `seen` set closed over by the regex callback, in
+  order of appearance in the text (not `referenced_issues` order).
+- The orchestrator's `SYSTEM_PROMPT` also forbids stating a ticket's priority level or
+  section/bucket in words (the auto-inserted emoji already conveys it) and locks the
+  no-linked-PR phrasing to one exact string, "no PR started", used consistently rather than
+  varying per mention — both are prompt-level rules, not code-enforced, so LLM
+  non-compliance is possible in principle even though nothing in `format_ask_response`
+  currently guards against either.
 
 ---
 
@@ -330,6 +427,15 @@ detail (by design — see `sanitize_error()`):**
   an unattended, `launchd`-triggered run never looks identical to "ran fine, nothing to report."
 - The script has no retry logic by design (see `CLAUDE.md`'s Slack Integration section) — a
   failed run just waits for `launchd`'s next scheduled trigger the following day.
+
+**Slack buttons (digest Quick Links, the standup-summary prompt) do nothing when clicked, with
+no error visible anywhere:**
+- Check that **Interactivity & Shortcuts** is toggled on for the Slack app at
+  [api.slack.com/apps](https://api.slack.com/apps) — this is separate from Socket Mode (no
+  Request URL needs filling in) and is easy to miss since Socket Mode alone is enough for
+  `app_mention` events to work. Without it, Slack never delivers `block_actions` payloads to
+  the socket connection at all, so `bolt_app.py`'s `@slack_app.action(...)` handlers never fire
+  and nothing in the app's own logs will show a failure.
 
 ---
 

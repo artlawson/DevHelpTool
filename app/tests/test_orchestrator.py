@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import anthropic
@@ -5,7 +6,7 @@ import httpx
 import pytest
 
 from app.agent import orchestrator
-from app.core.models import ToolResult
+from app.core.models import Issue, PullRequest, ToolResult
 
 
 class FakeTextBlock:
@@ -170,6 +171,51 @@ async def test_loop_terminates_at_max_iterations_with_forced_final_call(monkeypa
     assert len(call_kwargs) == orchestrator.MAX_ITERATIONS
     assert call_kwargs[-1]["tool_choice"] == {"type": "none"}
     assert call_kwargs[0]["tool_choice"] == {"type": "auto"}
+
+
+async def test_handle_query_collects_referenced_issues_and_prs_from_tool_data(
+    monkeypatch,
+):
+    tool_use_jira = FakeToolUseBlock("call_1", "jira_get_my_high_priority_issues")
+    tool_use_github = FakeToolUseBlock("call_2", "github_get_my_open_prs")
+    first_response = FakeResponse([tool_use_jira, tool_use_github], "tool_use")
+    final_response = FakeResponse([FakeTextBlock("Focus on AL-1.")], "end_turn")
+
+    mock_create = AsyncMock(side_effect=[first_response, final_response])
+    monkeypatch.setattr(orchestrator.anthropic_client.messages, "create", mock_create)
+
+    issue = Issue(
+        key="AL-1",
+        summary="Fix auth bug",
+        priority="High",
+        status="Open",
+        due_date=None,
+        has_linked_pr=False,
+        priority_score=3.0,
+    )
+    pr = PullRequest(
+        repo="acme/widgets",
+        number=514,
+        title="Fix auth bug",
+        url="https://github.com/acme/widgets/pull/514",
+        opened_at=datetime(2026, 1, 1, tzinfo=UTC),
+        is_review_requested=False,
+        is_authored_by_me=True,
+        age_score=0.0,
+    )
+    jira_tool = AsyncMock(return_value=ToolResult(ok=True, data=[issue], error=None))
+    github_tool = AsyncMock(return_value=ToolResult(ok=True, data=[pr], error=None))
+    monkeypatch.setitem(
+        orchestrator.TOOL_REGISTRY, "jira_get_my_high_priority_issues", jira_tool
+    )
+    monkeypatch.setitem(
+        orchestrator.TOOL_REGISTRY, "github_get_my_open_prs", github_tool
+    )
+
+    result = await orchestrator.handle_query("what should I work on today?")
+
+    assert result.referenced_issues == [issue]
+    assert result.referenced_prs == [pr]
 
 
 async def test_anthropic_api_error_raises_orchestrator_unavailable(monkeypatch):

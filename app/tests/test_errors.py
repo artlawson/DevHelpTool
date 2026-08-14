@@ -1,6 +1,7 @@
 import httpx
 
-from app.core.errors import sanitize_error
+from app.core.errors import sanitize_error, unwrap_tool_result
+from app.core.models import ToolResult
 
 
 def test_sanitize_http_status_error_returns_status_and_reason_only():
@@ -21,3 +22,15 @@ def test_sanitize_generic_exception_returns_generic_message():
 
     assert message == "RuntimeError: request failed"
     assert "postgres" not in message
+
+
+def test_unwrap_tool_result_returns_data_on_success():
+    result: ToolResult[list[str]] = ToolResult(ok=True, data=["AL-1"], error=None)
+
+    assert unwrap_tool_result("some_tool", result) == ["AL-1"]
+
+
+def test_unwrap_tool_result_degrades_to_empty_list_on_failure():
+    result: ToolResult[list[str]] = ToolResult(ok=False, data=None, error="boom")
+
+    assert unwrap_tool_result("some_tool", result) == []

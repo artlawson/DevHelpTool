@@ -37,3 +37,10 @@ class AskResponse(BaseModel):
     answer: str
     tool_calls: list[str]
     warnings: list[str] = []
+    # Every Issue/PullRequest actually returned by a tool call this turn,
+    # deduped by key/number - not rendered here (this module stays
+    # presentation-agnostic), but Slack's formatting.py uses these to turn
+    # plain-text mentions in `answer` into real hyperlinks + priority emoji
+    # without having to re-fetch or guess at URLs.
+    referenced_issues: list[Issue] = []
+    referenced_prs: list[PullRequest] = []

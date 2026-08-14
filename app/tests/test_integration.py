@@ -92,6 +92,12 @@ async def test_partial_failure_flows_end_to_end_through_the_real_api(monkeypatch
     # Sanitized per spec §10 - the raw GitHub response body must not leak.
     assert "internal error detail" not in body["warnings"][0]
 
+    # The real Issue fetched by the (successful) Jira tool call should reach
+    # the response's referenced_issues, unaffected by the GitHub tool's
+    # failure - this is what formatting.py's /ask hyperlinking depends on.
+    assert [i["key"] for i in body["referenced_issues"]] == ["AL-1"]
+    assert body["referenced_prs"] == []
+
     # Verify the ranked Jira data actually reached the model's second turn -
     # this is what proves the full chain (client -> tool -> dispatch ->
     # orchestrator) produced correct data, not just that *a* 200 came back.

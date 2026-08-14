@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     jira_project_key: str
     github_token: str
     github_username: str
+    # "owner/repo" - scopes the "PRs you could review" digest search. Optional so the
+    # app boots identically to today (and that search is just skipped) if unset.
+    github_repo: str | None = None
     slack_bot_token: str | None = None
     slack_app_token: str | None = None
     slack_channel_id: str | None = None

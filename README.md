@@ -57,6 +57,7 @@ cp .env.example .env
 | `JIRA_PROJECT_KEY` | Your Jira project key, e.g. `AL` — scopes Agile board/sprint lookups to your project |
 | `GITHUB_TOKEN` | Fine-grained GitHub PAT, scoped to the repos you want monitored |
 | `GITHUB_USERNAME` | Your GitHub username, used to build `author:`/`review-requested:` queries |
+| `GITHUB_REPO` | *(optional)* `"owner/repo"` — scopes the digest's "PRs You Could Review" section; that section is skipped if unset |
 | `SLACK_BOT_TOKEN` | *(optional)* Slack bot token (`xoxb-...`) — enables @-mention replies and the daily digest |
 | `SLACK_APP_TOKEN` | *(optional)* Slack app-level token (`xapp-...`) — enables Socket Mode, no public endpoint needed |
 | `SLACK_CHANNEL_ID` | *(optional)* Channel/DM ID the daily digest posts to |
@@ -77,9 +78,13 @@ curl -X POST localhost:8000/ask \
 {
   "answer": "You have 2 high-priority tickets without PRs: PROJ-123 and PROJ-140. You also have 1 PR awaiting your review: org/repo#42.",
   "tool_calls": ["jira_get_my_high_priority_issues", "jira_get_issues_without_prs", "github_get_prs_awaiting_my_review"],
-  "warnings": []
+  "warnings": [],
+  "referenced_issues": [],
+  "referenced_prs": []
 }
 ```
+
+`referenced_issues`/`referenced_prs` are the actual Issue/PullRequest objects fetched by tool calls this turn (empty above since the tools were mocked in this example) - Slack's formatting layer uses them to turn plain-text ticket/PR mentions in `answer` into real hyperlinks, but they're present on every `/ask` response regardless of caller.
 
 `GET /health` is a liveness check that requires no credentials or network access.
 
@@ -95,7 +100,8 @@ Slack is fully optional — everything above works exactly the same with no Slac
 2. Under **Socket Mode**, enable it and generate an app-level token with the `connections:write` scope — this is `SLACK_APP_TOKEN`. Socket Mode means no public HTTPS endpoint or tunnel is needed; the app connects out to Slack over a websocket.
 3. Under **OAuth & Permissions**, add the `app_mentions:read` and `chat:write` bot scopes, then install the app to your workspace — this gives you `SLACK_BOT_TOKEN`.
 4. Under **Event Subscriptions**, subscribe to the `app_mention` bot event.
-5. Invite the bot to a channel (`/invite @YourBotName`) and copy that channel's ID for `SLACK_CHANNEL_ID`.
+5. Under **Interactivity & Shortcuts**, toggle it **on**. This is required for the reply buttons (Quick Links, standup summary) to work — no Request URL field needs filling in, since Socket Mode delivers button clicks the same way it delivers events, but Slack won't send them at all unless this toggle is on.
+6. Invite the bot to a channel (`/invite @YourBotName`) and copy that channel's ID for `SLACK_CHANNEL_ID`.
 
 Add all three to `.env`, then start the server as usual — @-mention the bot and it replies in-thread using the same orchestrator as `/ask`.
 

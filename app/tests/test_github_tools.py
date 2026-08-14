@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.config import settings
 from app.tools import github_tools
 
 RAW_PR = {
@@ -76,6 +77,44 @@ async def test_age_score_is_populated_on_returned_pull_requests(monkeypatch):
 
     assert result.data is not None
     assert result.data[0].age_score >= 0
+
+
+async def test_get_prs_i_could_review_skips_search_when_repo_unset(monkeypatch):
+    monkeypatch.setattr(settings, "github_repo", None)
+    mock_search = AsyncMock(return_value=[RAW_PR])
+    monkeypatch.setattr(github_tools.github_client, "search_prs", mock_search)
+
+    result = await github_tools.get_prs_i_could_review()
+
+    assert result.ok is True
+    assert result.data == []
+    mock_search.assert_not_awaited()
+
+
+async def test_get_prs_i_could_review_scopes_query_and_excludes_self(monkeypatch):
+    monkeypatch.setattr(settings, "github_repo", "artlawson/DevHelpTool")
+    mock_search = AsyncMock(return_value=[RAW_PR])
+    monkeypatch.setattr(github_tools.github_client, "search_prs", mock_search)
+
+    result = await github_tools.get_prs_i_could_review()
+
+    assert result.ok is True
+    assert result.data is not None
+    (query,), _ = mock_search.call_args
+    assert "repo:artlawson/DevHelpTool" in query
+    assert f"-author:{settings.github_username}" in query
+    assert f"-review-requested:{settings.github_username}" in query
+
+
+async def test_get_prs_i_could_review_returns_error_result_on_failure(monkeypatch):
+    monkeypatch.setattr(settings, "github_repo", "artlawson/DevHelpTool")
+    mock_search = AsyncMock(side_effect=RuntimeError("503 Service Unavailable"))
+    monkeypatch.setattr(github_tools.github_client, "search_prs", mock_search)
+
+    result = await github_tools.get_prs_i_could_review()
+
+    assert result.ok is False
+    assert result.data is None
 
 
 @pytest.mark.parametrize(

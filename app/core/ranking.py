@@ -23,11 +23,18 @@ PRIORITY_WEIGHTS: dict[str, float] = {
     "Lowest": 0.0,
 }
 OVERDUE_BONUS: float = 1.5
-HIGH_PRIORITY_THRESHOLD: float = PRIORITY_WEIGHTS["High"]
 
 
 def is_overdue(due_date: date | None) -> bool:
     return due_date is not None and due_date < datetime.now(UTC).date()
+
+
+# High/Highest priority, or overdue regardless of priority - the single
+# definition of "urgent enough to read as red/in-flight" shared by
+# app/slack/formatting.py's priority emoji and app/slack/digest.py's standup
+# "Doing" filter, so the two never silently diverge on what counts.
+def is_urgent(priority: str, due_date: date | None) -> bool:
+    return priority in {"Highest", "High"} or is_overdue(due_date)
 
 
 def score_issue(issue: RawIssue) -> float:
@@ -40,10 +47,6 @@ def score_issue(issue: RawIssue) -> float:
 def score_pr(pr: RawPR) -> float:
     age_days = (datetime.now(UTC) - pr.opened_at).days
     return age_days * (2 if pr.is_review_requested else 1)
-
-
-def is_high_priority(score: float) -> bool:
-    return score >= HIGH_PRIORITY_THRESHOLD
 
 
 def rank[ItemT](items: list[ItemT], score_of: Callable[[ItemT], float]) -> list[ItemT]:
