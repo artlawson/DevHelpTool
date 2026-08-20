@@ -20,7 +20,7 @@ and design decisions behind it.
 /
 ├── CLAUDE.md
 ├── README.md
-├── pyproject.toml                # dependencies, ruff/mypy/pytest config
+├── pyproject.toml                # dependencies, ruff/mypy/pytest config, devhelp console script
 ├── .env.example                  # documents required env vars; .env itself is gitignored
 │
 ├── app/
@@ -47,7 +47,7 @@ and design decisions behind it.
 │   │   ├── ranking.py            # score_issue(), score_pr() - pure, LLM-free
 │   │   ├── cache.py              # TTLCache (in-memory, injectable clock for tests)
 │   │   ├── errors.py             # sanitize_error() - never leak raw exception text
-│   │   └── text.py               # apply_outside_links() - shared by Slack + CLI hyperlinking
+│   │   └── text.py               # apply_outside_links(), jira_issue_url() - shared Slack + CLI hyperlinking
 │   ├── slack/
 │   │   ├── bolt_app.py           # AsyncApp, app_mention handler (Socket Mode, @-mention path)
 │   │   ├── digest.py             # build_digest() - pure High Priority/Upcoming section logic
@@ -314,16 +314,21 @@ output, e.g. `devhelp standup > log.txt`, stays plain text automatically). `_hyp
 later-mentions-link-bare-key behavior for issues) but deliberately skip the priority-emoji
 insertion those Slack functions also do — that's compensation for Block Kit having no other way
 to signal priority inline; a terminal answer is already ordinary prose, so there's no equivalent
-gap to fill. Both Slack's and the CLI's hyperlinking share one algorithm now:
-`app/core/text.py:apply_outside_links()` (extracted from what used to be
-`formatting.py`'s private `_apply_outside_existing_links`) splits text on spans matching an
-already-built-link pattern and only substitutes in the text *between* them — guarding against a
-substitution pass reaching inside a link it or an earlier pass already built and corrupting it
-(e.g. a PR's own URL containing a `?ref=AL-1`-shaped query string, which is a real, tested case
-in `test_cli.py`, not a hypothetical). Only the link-pattern regex differs per caller
+gap to fill. Both Slack's and the CLI's hyperlinking share two things out of `app/core/text.py`
+now, not just the escape-sequence-vs-markdown difference: `apply_outside_links()` (extracted from
+what used to be `formatting.py`'s private `_apply_outside_existing_links`) splits text on spans
+matching an already-built-link pattern and only substitutes in the text *between* them — guarding
+against a substitution pass reaching inside a link it or an earlier pass already built and
+corrupting it (e.g. a PR's own URL containing a `?ref=AL-1`-shaped query string, which is a real,
+tested case in `test_cli.py`, not a hypothetical). Only the link-pattern regex differs per caller
 (`_SLACK_LINK_PATTERN` = `<[^<>]+>` vs `cli.py`'s `_TERMINAL_LINK_PATTERN` matching a full OSC 8
 span) — the splitting/reassembly logic is identical, so a bug fixed in one no longer needs a
-matching fix in the other found separately.
+matching fix in the other found separately. `jira_issue_url()` is the other shared piece — both
+modules build the exact same `{JIRA_BASE_URL}/browse/{key}` string, so it lives in `text.py`
+rather than as two private copies; this was caught and fixed in a self-review pass after the
+initial CLI implementation (it started as a private copy in `cli.py`, duplicating
+`formatting.py`'s), so check `app/core/text.py` before re-adding a `_jira_issue_url`-shaped
+helper anywhere new.
 
 ### Slack Integration
 

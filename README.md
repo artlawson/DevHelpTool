@@ -6,13 +6,17 @@ Data is fetched and deterministically ranked in Python (priority, due date, revi
 
 ## Architecture
 
+Three entry points, all calling the same orchestrator — only `/ask` goes through FastAPI at all;
+Slack and the CLI call `handle_query()` directly, in-process, no HTTP round trip:
+
+- `curl` / any HTTP client → `POST /ask` → `app/main.py`
+- Slack @-mention → `app/slack/bolt_app.py` (Socket Mode, in-process)
+- `devhelp <query>` → `app/cli.py`
+
 ```
-Client (curl / thin CLI)
-        │  POST /ask {"query": "..."}
-        ▼
-FastAPI app (app/main.py)
-        │
-        ▼
+                    (any of the three entry points above)
+                                    │
+                                    ▼
 Orchestrator (app/agent/orchestrator.py)
   - hand-rolled loop against the anthropic SDK
   - dispatches tool_use blocks via TOOL_REGISTRY
@@ -27,10 +31,10 @@ app/core/ranking.py (deterministic scoring, pure functions)
 Claude narrates the final answer from ranked, structured tool results
         │
         ▼
-FastAPI returns {"answer": "...", "tool_calls": [...], "warnings": [...]}
+AskResponse{"answer", "tool_calls", "warnings", ...} → HTTP JSON / Slack thread reply / stdout
 ```
 
-Tool implementations never import `anthropic` — `app/agent/schemas.py` and `app/agent/registry.py` are the only modules aware of the LLM. Every tool returns a `ToolResult` (`ok`/`data`/`error`), so one integration failing degrades the response gracefully instead of crashing the whole request.
+Tool implementations never import `anthropic` — `app/agent/schemas.py` and `app/agent/registry.py` are the only modules aware of the LLM. Every tool returns a `ToolResult` (`ok`/`data`/`error`), so one integration failing degrades the response gracefully instead of crashing the whole request. `devhelp standup` is the one exception to "all roads lead to the orchestrator" — it bypasses the LLM entirely and calls two tools directly, same as Slack's standup-summary button (see CLAUDE.md's CLI section for why).
 
 ## Setup
 
