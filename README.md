@@ -42,6 +42,15 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+**If this project lives under `~/Desktop` or `~/Documents` with iCloud Drive syncing those
+folders**, the `devhelp` console script (below) may intermittently fail with
+`ModuleNotFoundError: No module named 'app'`, even though everything else (`pytest`, `uvicorn`)
+works fine — iCloud periodically evicts the small `.pth` file the editable install relies on to
+make `app` importable, and `pip install -e ...` (in any mode) doesn't fix this durably. See
+CLAUDE.md's Troubleshooting section for the full explanation and two fixes: a workaround that
+always works (`python -m app.cli <query>` instead of `devhelp <query>`) and a durable one
+(exclude `.venv` from iCloud sync).
+
 Copy `.env.example` to `.env` and fill in your credentials:
 
 ```bash
@@ -89,6 +98,46 @@ curl -X POST localhost:8000/ask \
 `GET /health` is a liveness check that requires no credentials or network access.
 
 **Scope note:** this is a local-only, single-user tool — `/ask` has no authentication, and there's no deployment story. That's intentional, not an oversight; see `specs/feat-engineering-productivity-agent-mvp.md` §4/§10 for the reasoning.
+
+### CLI
+
+A `devhelp` command is installed with the package (see Setup above) as a thin terminal wrapper
+over the same `orchestrator.handle_query()` used by `/ask` and the Slack @-mention — no FastAPI
+server needs to be running:
+
+```bash
+devhelp
+Ask: what should I work on today?
+```
+
+Run it with no arguments and it prompts for the question — recommended, since typed input
+never goes through the shell's parser, so punctuation like `?` or `*` just works. You can also
+pass the query as arguments directly, but quote it so the shell (zsh in particular) doesn't try
+to glob-expand `?`/`*`: `devhelp "what should I work on today?"`. If the note above about
+iCloud/Desktop applies to you, substitute `python -m app.cli` for `devhelp` in either form.
+
+`devhelp standup` (that one word, nothing else) prints the same Doing/Reviewing/Next Up summary
+as Slack's standup-summary button — it bypasses the LLM entirely and calls the same two tools
+directly, so it's instant and doesn't touch the Anthropic API:
+
+```bash
+devhelp standup
+Doing:
+  🔴 AL-12 — Refactor caching layer
+Reviewing:
+  • acme/widgets#514 — Fix auth bug
+```
+
+Both the free-form answer and `devhelp standup`'s output turn Jira issue keys and PR mentions
+into clickable links when stdout is a real terminal — the equivalent of Slack's hyperlinking,
+using the OSC 8 escape sequence most modern terminal emulators support (iTerm2, Terminal.app,
+kitty, Windows Terminal, VS Code's integrated terminal). Piped or redirected output
+(`devhelp standup > log.txt`, `devhelp ... | grep ...`) automatically falls back to plain text —
+this is detected per run via `sys.stdout.isatty()`, not a setting.
+
+The answer prints to stdout; any tool-call warnings print to stderr and the exit code stays
+`0` (partial-failure degradation, same as `/ask`). If the Anthropic call itself fails, it
+prints an error to stderr and exits `1`.
 
 ## Slack Integration (optional)
 

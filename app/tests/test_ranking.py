@@ -5,6 +5,7 @@ from app.core.ranking import (
     RawPR,
     is_overdue,
     is_urgent,
+    priority_emoji,
     rank,
     score_issue,
     score_pr,
@@ -68,6 +69,24 @@ def test_is_urgent_true_for_overdue_regardless_of_priority():
 def test_is_urgent_false_for_medium_or_lower_not_overdue():
     assert is_urgent("Medium", None) is False
     assert is_urgent("Low", date(2999, 1, 1)) is False
+
+
+def test_priority_emoji_red_for_high_and_highest():
+    assert priority_emoji("High", None) == "🔴"
+    assert priority_emoji("Highest", None) == "🔴"
+
+
+def test_priority_emoji_red_for_overdue_regardless_of_priority():
+    assert priority_emoji("Low", date(2020, 1, 1)) == "🔴"
+
+
+def test_priority_emoji_yellow_for_medium():
+    assert priority_emoji("Medium", None) == "🟡"
+
+
+def test_priority_emoji_green_for_low_and_unrecognized_priority_names():
+    assert priority_emoji("Low", None) == "🟢"
+    assert priority_emoji("P0", None) == "🟢"
 
 
 def test_rank_sorts_descending_by_score():

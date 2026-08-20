@@ -13,6 +13,9 @@ dependencies = [
     "aiohttp",
 ]
 
+[project.scripts]
+devhelp = "app.cli:run"
+
 [project.optional-dependencies]
 dev = [
     "pytest",

@@ -37,6 +37,21 @@ def is_urgent(priority: str, due_date: date | None) -> bool:
     return priority in {"Highest", "High"} or is_overdue(due_date)
 
 
+# Three-tier, not a per-priority-name gradient: red is is_urgent() (High/Highest
+# priority, or already overdue regardless of priority), yellow is Medium, green is
+# everything else (Low/Lowest, or any non-standard priority name a Jira project
+# might use - falls back to green rather than raising, per CLAUDE.md's
+# PRIORITY_WEIGHTS KeyError gotcha). Shared by every interface that renders an
+# Issue (Slack's formatting.py, the CLI's standup command) so the visual language
+# stays consistent instead of each maintaining its own copy of this predicate.
+def priority_emoji(priority: str, due_date: date | None) -> str:
+    if is_urgent(priority, due_date):
+        return "🔴"
+    if priority == "Medium":
+        return "🟡"
+    return "🟢"
+
+
 def score_issue(issue: RawIssue) -> float:
     score = PRIORITY_WEIGHTS[issue.priority]
     if is_overdue(issue.due_date):

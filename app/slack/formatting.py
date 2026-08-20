@@ -1,35 +1,20 @@
 import re
-from collections.abc import Callable
 
-from app.config import settings
 from app.core.models import AskResponse, Issue, PullRequest
-from app.core.ranking import is_overdue, is_urgent
+from app.core.ranking import is_overdue, priority_emoji
+from app.core.text import apply_outside_links, jira_issue_url
 from app.slack.digest import Digest, DigestSection, StandupSummary
-
-
-# Three-tier, not a per-priority-name gradient: red is is_urgent() (High/Highest
-# priority, or already overdue regardless of priority - shared with the standup
-# summary's "Doing" filter, see app/core/ranking.py), yellow is Medium, green is
-# everything else (Low/Lowest, or any non-standard priority name a Jira project
-# might use - falls back to green rather than raising, per CLAUDE.md's
-# PRIORITY_WEIGHTS KeyError gotcha).
-def _priority_emoji(issue: Issue) -> str:
-    if is_urgent(issue.priority, issue.due_date):
-        return "🔴"
-    if issue.priority == "Medium":
-        return "🟡"
-    return "🟢"
-
-
-def _jira_issue_url(key: str) -> str:
-    return f"{settings.jira_base_url.rstrip('/')}/browse/{key}"
 
 
 def _issue_bullet(
     issue: Issue, *, number: int | None = None, emoji: str | None = None
 ) -> str:
-    url = _jira_issue_url(issue.key)
-    resolved_emoji = emoji if emoji is not None else _priority_emoji(issue)
+    url = jira_issue_url(issue.key)
+    resolved_emoji = (
+        emoji
+        if emoji is not None
+        else priority_emoji(issue.priority, issue.due_date)
+    )
     # Unnumbered lists use the priority emoji itself as the bullet rather than
     # a separate "•" - a literal bullet char next to an emoji double-marks the
     # same line. Numbered (ranked) lists keep the number, which the emoji can't
@@ -54,7 +39,7 @@ def _heading_block(heading: str) -> dict:
 
 
 def _issue_actions_block(issue: Issue) -> dict:
-    url = _jira_issue_url(issue.key)
+    url = jira_issue_url(issue.key)
     elements = [
         {
             "type": "button",
@@ -143,7 +128,7 @@ def _digest_summary_blocks(digest: Digest) -> list[dict]:
 
     if high_items:
         top = high_items[0]
-        lead = f"Start with <{_jira_issue_url(top.key)}|{top.key}>"
+        lead = f"Start with <{jira_issue_url(top.key)}|{top.key}>"
         rest = len(high_items) - 1
         if rest:
             lead += f", plus {rest} more high-priority item{'s' if rest != 1 else ''}"
@@ -265,21 +250,6 @@ _PR_MENTION_PATTERN = re.compile(r"PR\s*#(\d+)", re.IGNORECASE)
 _SLACK_LINK_PATTERN = re.compile(r"<[^<>]+>")
 
 
-# A Slack link's URL slot commonly *contains* an issue-key- or PR-number-shaped
-# substring (e.g. ".../browse/AL-12" or ".../pull/514") - substituting inside an
-# already-built `<url|text>` span would nest broken markup. Splitting on
-# existing link spans and only transforming the text between them keeps every
-# pass safe to re-run on output from a previous pass.
-def _apply_outside_existing_links(text: str, transform: Callable[[str], str]) -> str:
-    segments = _SLACK_LINK_PATTERN.split(text)
-    links = _SLACK_LINK_PATTERN.findall(text)
-    pieces = [transform(segments[0])]
-    for link, segment in zip(links, segments[1:], strict=True):
-        pieces.append(link)
-        pieces.append(transform(segment))
-    return "".join(pieces)
-
-
 def _hyperlink_prs(text: str, referenced_prs: list[PullRequest]) -> str:
     by_number = {pr.number: pr for pr in referenced_prs}
 
@@ -289,8 +259,8 @@ def _hyperlink_prs(text: str, referenced_prs: list[PullRequest]) -> str:
             return match.group(0)
         return f"<{pr.url}|PR #{pr.number}>"
 
-    return _apply_outside_existing_links(
-        text, lambda s: _PR_MENTION_PATTERN.sub(replace, s)
+    return apply_outside_links(
+        text, _SLACK_LINK_PATTERN, lambda s: _PR_MENTION_PATTERN.sub(replace, s)
     )
 
 
@@ -309,14 +279,15 @@ def _hyperlink_and_flag_issues(text: str, referenced_issues: list[Issue]) -> str
         issue = by_key.get(key)
         if issue is None:
             return key
-        url = _jira_issue_url(key)
+        url = jira_issue_url(key)
         if key in seen:
             return f"<{url}|{key}>"
         seen.add(key)
-        return f"{_priority_emoji(issue)} <{url}|{key}> <{url}|{issue.summary}>"
+        emoji = priority_emoji(issue.priority, issue.due_date)
+        return f"{emoji} <{url}|{key}> <{url}|{issue.summary}>"
 
-    return _apply_outside_existing_links(
-        text, lambda s: _ISSUE_KEY_PATTERN.sub(replace, s)
+    return apply_outside_links(
+        text, _SLACK_LINK_PATTERN, lambda s: _ISSUE_KEY_PATTERN.sub(replace, s)
     )
 
 

@@ -25,6 +25,7 @@ and design decisions behind it.
 │
 ├── app/
 │   ├── main.py                   # FastAPI app: POST /ask, GET /health; Slack lifespan hook
+│   ├── cli.py                    # `devhelp` console script - terminal wrapper over handle_query()
 │   ├── config.py                 # pydantic-settings Settings, loaded from .env
 │   ├── agent/
 │   │   ├── orchestrator.py       # hand-rolled Claude tool-calling loop
@@ -45,7 +46,8 @@ and design decisions behind it.
 │   │   ├── models.py             # Issue, PullRequest, ToolResult[T], AskResponse
 │   │   ├── ranking.py            # score_issue(), score_pr() - pure, LLM-free
 │   │   ├── cache.py              # TTLCache (in-memory, injectable clock for tests)
-│   │   └── errors.py             # sanitize_error() - never leak raw exception text
+│   │   ├── errors.py             # sanitize_error() - never leak raw exception text
+│   │   └── text.py               # apply_outside_links() - shared by Slack + CLI hyperlinking
 │   ├── slack/
 │   │   ├── bolt_app.py           # AsyncApp, app_mention handler (Socket Mode, @-mention path)
 │   │   ├── digest.py             # build_digest() - pure High Priority/Upcoming section logic
@@ -76,6 +78,12 @@ cp .env.example .env   # then fill in real credentials
 
 # Run the service
 uvicorn app.main:app --reload --reload-dir app
+
+# Or skip the server entirely and ask from the terminal (prompts for the query,
+# so shell metacharacters like ? or * in your question are never an issue)
+devhelp
+# ^ if this fails with ModuleNotFoundError: No module named 'app', see Troubleshooting below
+#   (iCloud/Desktop sync) - `python -m app.cli` always works as a substitute
 
 # Lint / type-check / test
 ruff check app/
@@ -251,6 +259,72 @@ Jira instance — this project's own Jira project has never had a sprint (closed
 all yet, the same live-testing limitation already noted for the "did you mean Sprint X" feature
 above.
 
+### CLI
+
+`app/cli.py` is a third interface onto the same `orchestrator.handle_query()` used by `/ask`
+and the Slack @-mention path (`app/slack/bolt_app.py:handle_mention`) — deliberately not a
+fourth reimplementation of the tool-calling loop. Installed as the `devhelp` console script
+(`[project.scripts]` in `pyproject.toml`, `app.cli:run`), so it runs without `uvicorn` and
+without any Slack config. `main(argv)` joins the positional `query` args into one string if any
+were given; if not, it prompts (`Ask: `) and reads one instead — deliberately, since typed
+terminal input isn't parsed by the shell the way argv is, so a query containing `?`/`*`
+(zsh/bash glob characters) never breaks. That prompt read goes through `asyncio.to_thread`
+rather than a bare `input()` call, since `main()` is a coroutine and a blocking call would stall
+the event loop (`ruff`'s `ASYNC250` catches a bare one). `main` prints `response.answer` to
+stdout and each `response.warnings` entry to stderr — mirroring `/ask`'s partial-degradation
+behavior (a failed tool call degrades the answer rather than failing the whole request) rather
+than treating a warning as fatal. Two non-zero exit paths: `2` for an empty query (either no
+args and a blank/EOF prompt response), mirroring argparse's own convention for a usage error;
+`1` for `OrchestratorUnavailable` (the Anthropic call itself failing), which prints a sanitized
+message to stderr rather than the raw exception — there's no partial answer to fall back to
+either way, but the two are kept distinct since one is a user-input problem and the other is a
+backend failure. For free-form questions, `cli.py` goes through the LLM orchestrator the same
+way `/ask` does (never calls `app/tools/*` directly for that path), so it gets the same tool
+selection and prioritized-summary behavior, not just a raw dump of one tool's data.
+
+`devhelp standup` is the one exception: passing exactly the single literal argument `"standup"`
+(checked before `_parse_args` even runs, since argparse's own subparsers mechanism would
+otherwise greedily claim the first positional token as a subcommand name and error on any other
+free-form query starting with a different word) routes to `_run_standup()`, which mirrors
+`app/slack/bolt_app.py:handle_standup_summary_request` almost exactly: same two direct tool
+calls (`jira_tools.get_my_issues_with_linked_prs`, `github_tools.get_prs_awaiting_my_review`),
+same `unwrap_tool_result()` degradation, same `app/slack/digest.py:build_standup_summary()` —
+just rendered for a terminal instead of Block Kit, since `_issue_bullet`/`_pr_bullet` in
+`app/slack/formatting.py` bake in Slack's `<url|text>` link syntax, which would print as literal
+noise in a terminal. `_issue_line`/`_pr_line` in `cli.py` are the terminal equivalents; the
+actual priority-emoji predicate they both key off, `priority_emoji()`, was promoted out of
+`app/slack/formatting.py` into `app/core/ranking.py` (alongside `is_urgent`, which it wraps)
+specifically so the CLI didn't have to duplicate a private Slack-module function to get the same
+red/yellow/green priority language — check `app/core/ranking.py` before re-adding any
+priority→emoji logic elsewhere. `devhelp standup` never calls the Anthropic API at all, matching
+the Slack button's design intent: instant, deterministic, no LLM latency or cost for a summary
+that's pure data selection.
+
+**Terminal hyperlinking**: both the free-form-question path and `devhelp standup` turn Jira issue
+keys and PR mentions into clickable links when `sys.stdout.isatty()` — checked once per `main()`
+call and threaded through as an explicit `hyperlink: bool` parameter rather than read ad hoc
+deep in each renderer, so tests can exercise both branches without monkeypatching `sys.stdout`
+in most of them. `cli.py:_terminal_link()` emits the OSC 8 escape sequence
+(`\033]8;;{url}\033\\{text}\033]8;;\033\\`), the terminal-emulator equivalent of Slack's
+`<url|text>` — unsupported terminals just print the escape bytes as inert noise around plain
+text, so this is only ever attempted when stdout is confirmed to be a real tty (piped/redirected
+output, e.g. `devhelp standup > log.txt`, stays plain text automatically). `_hyperlink_prs`/
+`_hyperlink_issues` mirror `app/slack/formatting.py`'s `_hyperlink_prs`/
+`_hyperlink_and_flag_issues` almost exactly (including the same first-mention-links-key-and-title,
+later-mentions-link-bare-key behavior for issues) but deliberately skip the priority-emoji
+insertion those Slack functions also do — that's compensation for Block Kit having no other way
+to signal priority inline; a terminal answer is already ordinary prose, so there's no equivalent
+gap to fill. Both Slack's and the CLI's hyperlinking share one algorithm now:
+`app/core/text.py:apply_outside_links()` (extracted from what used to be
+`formatting.py`'s private `_apply_outside_existing_links`) splits text on spans matching an
+already-built-link pattern and only substitutes in the text *between* them — guarding against a
+substitution pass reaching inside a link it or an earlier pass already built and corrupting it
+(e.g. a PR's own URL containing a `?ref=AL-1`-shaped query string, which is a real, tested case
+in `test_cli.py`, not a hypothetical). Only the link-pattern regex differs per caller
+(`_SLACK_LINK_PATTERN` = `<[^<>]+>` vs `cli.py`'s `_TERMINAL_LINK_PATTERN` matching a full OSC 8
+span) — the splitting/reassembly logic is identical, so a bug fixed in one no longer needs a
+matching fix in the other found separately.
+
 ### Slack Integration
 
 Two independent entry points, neither of which changes `/ask`'s behavior:
@@ -374,6 +448,33 @@ Two independent entry points, neither of which changes `/ask`'s behavior:
 - The `.venv` hasn't been created yet, or dependencies aren't installed — run the one-time
   setup under Local Development above. Hooks in `.claude/settings.json` call `.venv/bin/ruff`
   etc. directly (not the bare command), so they need the venv to exist at the repo root.
+
+**`devhelp` fails with `ModuleNotFoundError: No module named 'app'`, even though `pytest`/`uvicorn`
+work fine and `.venv/bin/python3 -c "import app"` succeeds:**
+- If this project lives under `~/Desktop` or `~/Documents` with iCloud Drive Desktop &
+  Documents syncing enabled (`defaults read com.apple.finder FXICloudDriveDesktop` → `1`),
+  this is almost certainly why: the console script's editable-install `.pth` file under
+  `.venv/lib/.../site-packages/` is a small file macOS periodically dematerializes (evicts the
+  local copy, fetches on demand). `site.py` reads that directory at interpreter startup to
+  register the editable-install mechanism that makes `app` importable outside the project
+  root — when the file isn't locally resident at that instant, the read silently no-ops (no
+  exception, no warning) and `app` never lands on `sys.path`. This reproduces intermittently:
+  works immediately after `pip install`, then starts failing again on its own with no further
+  changes made — confirmed on this project by running `devhelp --help` in a loop and watching
+  it flip from passing to consistently failing. Switching install modes
+  (`--config-settings editable_mode=compat`) does *not* durably fix it — it's the same
+  dematerialization issue hitting a differently-shaped `.pth` file, just less often.
+  `pytest`/`uvicorn` are unaffected only because they're invoked from the project root, where
+  the plain `''` (cwd) entry on `sys.path` finds `app/` directly without touching this
+  mechanism at all — the installed `devhelp` script runs from `.venv/bin/`, which has no such
+  luck.
+  - **Reliable workaround, no reinstall needed:** `python -m app.cli <query>` (or
+    `.venv/bin/python3 -m app.cli <query>`) — `python -m` always puts the current working
+    directory on `sys.path` directly, sidestepping the `.pth`/site-packages mechanism
+    entirely. This has not failed once in repeated testing, unlike the installed script.
+  - **Durable fix:** exclude `.venv` from iCloud sync, e.g. `mv .venv .venv.nosync && ln -s
+    .venv.nosync .venv` (the `.nosync` suffix is a convention iCloud/Finder respects), or
+    create the venv somewhere outside `~/Desktop`/`~/Documents` entirely.
 
 **`uvicorn --reload` crashes with `TimeoutError: [Errno 60] Operation timed out` reading a `.venv` file,
 or reload-loops on package files like `fastapi/__init__.py`:**
