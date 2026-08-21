@@ -1,6 +1,6 @@
 from datetime import UTC, date, datetime
 
-from app.core.models import AskResponse, Issue, PullRequest, ToolResult
+from app.core.models import AskResponse, CommentDraft, Issue, PullRequest, ToolResult
 
 
 def test_issue_model_constructs():
@@ -50,3 +50,14 @@ def test_tool_result_success_and_failure_variants():
 def test_ask_response_defaults_warnings_to_empty_list():
     response = AskResponse(answer="you're all caught up", tool_calls=[])
     assert response.warnings == []
+
+
+def test_ask_response_defaults_pending_comment_draft_to_none():
+    response = AskResponse(answer="you're all caught up", tool_calls=[])
+    assert response.pending_comment_draft is None
+
+
+def test_comment_draft_model_constructs():
+    draft = CommentDraft(issue_key="AL-13", note_text="quick thought here")
+    assert draft.issue_key == "AL-13"
+    assert draft.note_text == "quick thought here"

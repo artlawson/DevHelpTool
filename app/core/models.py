@@ -33,6 +33,15 @@ class ToolResult[T](BaseModel):
     note: str | None = None
 
 
+# Deliberately no issue title/summary field - enriching this with anything not
+# actually fetched by a tool call this turn would violate the same
+# anti-hallucination principle orchestrator.py's _record_referenced_data
+# already enforces for referenced_issues/referenced_prs below.
+class CommentDraft(BaseModel):
+    issue_key: str
+    note_text: str
+
+
 class AskResponse(BaseModel):
     answer: str
     tool_calls: list[str]
@@ -44,3 +53,8 @@ class AskResponse(BaseModel):
     # without having to re-fetch or guess at URLs.
     referenced_issues: list[Issue] = []
     referenced_prs: list[PullRequest] = []
+    # Set only when the model called jira_draft_comment this turn - the
+    # actual Jira write never happens here or anywhere in the orchestrator's
+    # loop; callers (CLI, Slack) show this to the user and only invoke
+    # jira_tools.post_comment() after an explicit separate confirmation.
+    pending_comment_draft: CommentDraft | None = None

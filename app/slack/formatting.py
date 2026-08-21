@@ -1,6 +1,7 @@
+import json
 import re
 
-from app.core.models import AskResponse, Issue, PullRequest
+from app.core.models import AskResponse, CommentDraft, Issue, PullRequest
 from app.core.ranking import is_overdue, priority_emoji
 from app.core.text import apply_outside_links, jira_issue_url
 from app.slack.digest import Digest, DigestSection, StandupSummary
@@ -313,16 +314,89 @@ _STANDUP_FOLLOWUP_PROMPT = (
 )
 
 
+# These 3 blocks live inside the same single message as the main answer and
+# the standup-followup prompt (format_ask_response returns one combined list,
+# posted via one say() call) - block_id lets bolt_app.py's handle_confirm_comment
+# find and replace just these blocks via response_url, without disturbing the
+# answer text or the standup buttons that share the same message.
+COMMENT_DRAFT_BLOCK_ID_PREFIX = "comment_draft"
+
+
+# First button in this codebase to carry a `value` payload - every existing
+# button either opens a `url` client-side or has the handler re-derive
+# everything it needs from body["message"]. The actual Jira write happens
+# only in bolt_app.py's ask_confirm_comment handler, never here and never in
+# the orchestrator's tool-calling loop.
+def _comment_draft_blocks(draft: CommentDraft) -> list[dict]:
+    value = json.dumps({"issue_key": draft.issue_key, "note_text": draft.note_text})
+    return [
+        {"type": "divider", "block_id": f"{COMMENT_DRAFT_BLOCK_ID_PREFIX}_divider"},
+        {
+            "type": "section",
+            "block_id": f"{COMMENT_DRAFT_BLOCK_ID_PREFIX}_section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Draft comment for {draft.issue_key}:*\n> {draft.note_text}",
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": f"{COMMENT_DRAFT_BLOCK_ID_PREFIX}_actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Post to Jira"},
+                    "style": "primary",
+                    "action_id": "ask_confirm_comment",
+                    "value": value,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Discard"},
+                    "action_id": "ask_discard_comment_draft",
+                },
+            ],
+        },
+    ]
+
+
+# Used by bolt_app.py's handle_confirm_comment after a click, so the
+# original message's answer text and standup buttons survive a
+# response_url replace_original call - only the draft's own 3 blocks (tagged
+# above) are swapped out for a single outcome line, in place.
+def replace_comment_draft_blocks(blocks: list[dict], outcome_text: str) -> list[dict]:
+    draft_indices = [
+        i
+        for i, block in enumerate(blocks)
+        if block.get("block_id", "").startswith(COMMENT_DRAFT_BLOCK_ID_PREFIX)
+    ]
+    if not draft_indices:
+        return blocks
+    outcome_block = {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": outcome_text},
+    }
+    remaining = [b for i, b in enumerate(blocks) if i not in draft_indices]
+    insert_at = draft_indices[0]
+    return [*remaining[:insert_at], outcome_block, *remaining[insert_at:]]
+
+
 def format_ask_response(response: AskResponse) -> list[dict]:
     text = _sanitize_markdown_for_slack(response.answer)
     text = _hyperlink_prs(text, response.referenced_prs)
     text = _hyperlink_and_flag_issues(text, response.referenced_issues)
     text = _drop_bullet_before_priority_emoji(text)
+    draft_blocks = (
+        _comment_draft_blocks(response.pending_comment_draft)
+        if response.pending_comment_draft is not None
+        else []
+    )
     return [
         {
             "type": "section",
             "text": {"type": "mrkdwn", "text": text},
         },
+        *draft_blocks,
         {"type": "divider"},
         {
             "type": "section",

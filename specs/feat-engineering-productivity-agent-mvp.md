@@ -31,7 +31,13 @@ Checking "what do I need to do today" currently means manually opening Jira, fil
 - Production authentication (OAuth flows, multi-tenant auth, token refresh services)
 - Web dashboard or any frontend beyond the API itself
 - Slack, Calendar, CI/CD monitoring, standup generation, deployment/observability tooling (post-MVP roadmap only)
-- Write/mutating operations against Jira or GitHub (MVP is strictly read-only)
+- Write/mutating operations against Jira or GitHub, with one narrow, explicitly
+  user-confirmed exception: posting a quick note as a Jira comment
+  (`jira_tools.post_comment`), never triggered by the LLM's own tool-calling loop and always
+  gated on an explicit human confirmation (a CLI y/n prompt or a Slack button) after the model
+  only *drafts* the comment via a separate, non-mutating `jira_draft_comment` tool call. No other
+  write path exists against Jira or GitHub - see CLAUDE.md's "Cross-User Lookups and the
+  Draft/Confirm Write Path" for the full design.
 
 ## 5) Technical Dependencies
 

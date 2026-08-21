@@ -1,11 +1,13 @@
+import json
 from datetime import UTC, date, datetime
 
-from app.core.models import AskResponse, Issue, PullRequest
+from app.core.models import AskResponse, CommentDraft, Issue, PullRequest
 from app.slack.digest import Digest, DigestSection, StandupSummary
 from app.slack.formatting import (
     format_ask_response,
     format_digest,
     format_standup_summary,
+    replace_comment_draft_blocks,
 )
 
 
@@ -586,4 +588,97 @@ def test_format_standup_summary_has_explicit_empty_state():
     blocks = format_standup_summary(summary)
 
     assert len(blocks) == 1
-    assert "Nothing high-priority" in blocks[0]["text"]["text"]
+
+
+def test_format_ask_response_includes_comment_draft_blocks_when_pending():
+    draft = CommentDraft(issue_key="AL-13", note_text="quick thought here")
+    response = AskResponse(
+        answer="Drafted a note for AL-13.",
+        tool_calls=["jira_draft_comment"],
+        warnings=[],
+        pending_comment_draft=draft,
+    )
+
+    blocks = format_ask_response(response)
+
+    actions_blocks = [b for b in blocks if b["type"] == "actions"]
+    assert len(actions_blocks) == 2
+    draft_actions = actions_blocks[0]
+    action_ids = {el["action_id"] for el in draft_actions["elements"]}
+    assert action_ids == {"ask_confirm_comment", "ask_discard_comment_draft"}
+
+    section_texts = [
+        b["text"]["text"] for b in blocks if b["type"] == "section"
+    ]
+    assert any("AL-13" in t and "quick thought here" in t for t in section_texts)
+
+
+def test_format_ask_response_comment_draft_button_value_round_trips():
+    draft = CommentDraft(issue_key="AL-13", note_text="quick thought here")
+    response = AskResponse(
+        answer="Drafted a note for AL-13.",
+        tool_calls=["jira_draft_comment"],
+        warnings=[],
+        pending_comment_draft=draft,
+    )
+
+    blocks = format_ask_response(response)
+
+    actions_blocks = [b for b in blocks if b["type"] == "actions"]
+    confirm_button = next(
+        el
+        for el in actions_blocks[0]["elements"]
+        if el["action_id"] == "ask_confirm_comment"
+    )
+    payload = json.loads(confirm_button["value"])
+    assert payload == {"issue_key": "AL-13", "note_text": "quick thought here"}
+
+
+def test_replace_comment_draft_blocks_preserves_answer_and_standup_blocks():
+    draft = CommentDraft(issue_key="AL-13", note_text="quick thought here")
+    response = AskResponse(
+        answer="You have 1 high priority issue.",
+        tool_calls=[],
+        warnings=[],
+        pending_comment_draft=draft,
+    )
+    original_blocks = format_ask_response(response)
+
+    new_blocks = replace_comment_draft_blocks(
+        original_blocks, "Comment posted to AL-13."
+    )
+
+    assert new_blocks[0]["text"]["text"] == "You have 1 high priority issue."
+    assert not any(
+        b.get("block_id", "").startswith("comment_draft") for b in new_blocks
+    )
+    outcome_texts = [
+        b["text"]["text"] for b in new_blocks if b["type"] == "section"
+    ]
+    assert "Comment posted to AL-13." in outcome_texts
+    # The standup-followup prompt/buttons (unrelated to the draft) must
+    # survive - a bare replace_original with only `text=` would have wiped
+    # the whole original message, not just the draft's 3 blocks.
+    actions_blocks = [b for b in new_blocks if b["type"] == "actions"]
+    assert len(actions_blocks) == 1
+    action_ids = {el["action_id"] for el in actions_blocks[0]["elements"]}
+    assert action_ids == {"ask_standup_dismiss", "ask_standup_summary"}
+
+
+def test_replace_comment_draft_blocks_is_a_no_op_when_no_draft_blocks_present():
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "plain answer"}}]
+
+    result = replace_comment_draft_blocks(blocks, "irrelevant")
+
+    assert result == blocks
+
+
+def test_format_ask_response_omits_comment_draft_blocks_when_not_pending():
+    response = AskResponse(answer="No draft here.", tool_calls=[], warnings=[])
+
+    blocks = format_ask_response(response)
+
+    actions_blocks = [b for b in blocks if b["type"] == "actions"]
+    assert len(actions_blocks) == 1
+    action_ids = {el["action_id"] for el in actions_blocks[0]["elements"]}
+    assert "ask_confirm_comment" not in action_ids

@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 import respx
@@ -187,3 +189,117 @@ async def test_closed_and_active_sprints_do_not_share_a_cache_key(settings: Sett
     await client.get_active_sprints(1)
 
     assert route.call_count == 2
+
+
+@respx.mock
+async def test_search_users_sends_get_with_query_param(settings: Settings):
+    # /rest/api/3/user/search returns a bare JSON array, unlike get_boards()'s
+    # {"values": [...]} shape - deliberately asserted here.
+    route = respx.get("https://example.atlassian.net/rest/api/3/user/search").mock(
+        return_value=httpx.Response(
+            200, json=[{"accountId": "abc123", "displayName": "Sam Lee"}]
+        )
+    )
+
+    client = JiraClient(settings)
+    users = await client.search_users("Sam")
+
+    assert users == [{"accountId": "abc123", "displayName": "Sam Lee"}]
+    request = route.calls[0].request
+    assert request.url.params["query"] == "Sam"
+
+
+@respx.mock
+async def test_search_users_uses_cache_per_query(settings: Settings):
+    route = respx.get("https://example.atlassian.net/rest/api/3/user/search").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    client = JiraClient(settings, cache=TTLCache(ttl_seconds=60))
+    await client.search_users("Sam")
+    await client.search_users("Sam")
+    await client.search_users("Alex")
+
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_get_myself_sends_get_and_caches(settings: Settings):
+    route = respx.get("https://example.atlassian.net/rest/api/3/myself").mock(
+        return_value=httpx.Response(200, json={"accountId": "me123"})
+    )
+
+    client = JiraClient(settings, cache=TTLCache(ttl_seconds=60))
+    first = await client.get_myself()
+    second = await client.get_myself()
+
+    assert first == {"accountId": "me123"}
+    assert second == {"accountId": "me123"}
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_get_comments_sends_get_with_order_by_created(settings: Settings):
+    route = respx.get(
+        "https://example.atlassian.net/rest/api/3/issue/AL-1/comment"
+    ).mock(return_value=httpx.Response(200, json={"comments": [{"id": "1"}]}))
+
+    client = JiraClient(settings)
+    comments = await client.get_comments("AL-1")
+
+    assert comments == [{"id": "1"}]
+    request = route.calls[0].request
+    assert request.url.params["orderBy"] == "created"
+
+
+@respx.mock
+async def test_get_comments_uses_cache_per_issue_key(settings: Settings):
+    route = respx.get(
+        "https://example.atlassian.net/rest/api/3/issue/AL-1/comment"
+    ).mock(return_value=httpx.Response(200, json={"comments": []}))
+
+    client = JiraClient(settings, cache=TTLCache(ttl_seconds=60))
+    await client.get_comments("AL-1")
+    await client.get_comments("AL-1")
+
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_add_comment_posts_body_and_returns_response_json(settings: Settings):
+    route = respx.post(
+        "https://example.atlassian.net/rest/api/3/issue/AL-1/comment"
+    ).mock(return_value=httpx.Response(201, json={"id": "10001"}))
+
+    client = JiraClient(settings)
+    body = {"type": "doc", "version": 1, "content": []}
+    result = await client.add_comment("AL-1", body)
+
+    assert result == {"id": "10001"}
+    request = route.calls[0].request
+    assert json.loads(request.content) == {"body": body}
+
+
+@respx.mock
+async def test_add_comment_is_never_cached(settings: Settings):
+    route = respx.post(
+        "https://example.atlassian.net/rest/api/3/issue/AL-1/comment"
+    ).mock(return_value=httpx.Response(201, json={"id": "10001"}))
+
+    client = JiraClient(settings, cache=TTLCache(ttl_seconds=60))
+    body = {"type": "doc", "version": 1, "content": []}
+    await client.add_comment("AL-1", body)
+    await client.add_comment("AL-1", body)
+
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_add_comment_raises_on_error(settings: Settings):
+    respx.post("https://example.atlassian.net/rest/api/3/issue/AL-1/comment").mock(
+        return_value=httpx.Response(404, json={"error": "not found"})
+    )
+
+    client = JiraClient(settings)
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.add_comment("AL-1", {"type": "doc", "version": 1, "content": []})

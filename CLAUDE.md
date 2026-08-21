@@ -40,7 +40,9 @@ and design decisions behind it.
 │   │   │                         #   get_incomplete_issues_from_last_sprint,
 │   │   │                         #   get_current_sprint_issues,
 │   │   │                         #   get_lower_priority_issues_due_soon,
-│   │   │                         #   get_backlog_issues_needing_details
+│   │   │                         #   get_backlog_issues_needing_details,
+│   │   │                         #   get_persons_open_issues, draft_comment,
+│   │   │                         #   post_comment, get_issues_awaiting_my_response
 │   │   └── github_tools.py       # get_my_open_prs, get_prs_awaiting_my_review
 │   ├── core/
 │   │   ├── models.py             # Issue, PullRequest, ToolResult[T], AskResponse
@@ -49,7 +51,7 @@ and design decisions behind it.
 │   │   ├── errors.py             # sanitize_error() - never leak raw exception text
 │   │   └── text.py               # apply_outside_links(), jira_issue_url() - shared Slack + CLI hyperlinking
 │   ├── slack/
-│   │   ├── bolt_app.py           # AsyncApp, app_mention handler (Socket Mode, @-mention path)
+│   │   ├── bolt_app.py           # AsyncApp, app_mention + message (thread-continuation) handlers
 │   │   ├── digest.py             # build_digest() - pure High Priority/Upcoming section logic
 │   │   └── formatting.py         # Issue/AskResponse -> Slack Block Kit
 │   └── tests/                    # pytest; all external HTTP mocked via respx
@@ -259,28 +261,136 @@ Jira instance — this project's own Jira project has never had a sprint (closed
 all yet, the same live-testing limitation already noted for the "did you mean Sprint X" feature
 above.
 
+### Cross-User Lookups and the Draft/Confirm Write Path
+
+Three tools extend the original read-only design:
+
+- **`get_persons_open_issues(person: str)`** (`app/tools/jira_tools.py`) is the first
+  *parameterized* tool in `TOOL_REGISTRY` — every tool before it took zero arguments.
+  `dispatch()` (`app/agent/orchestrator.py`) now calls `tool_fn(**block.input)` rather than
+  `tool_fn()`; since every existing tool's schema still declares `input_schema.properties: {}`,
+  `block.input` is `{}` for them and `tool_fn(**{})` is exactly `tool_fn()` — fully backward
+  compatible. `TOOL_REGISTRY`'s value type loosened from `Callable[[], Awaitable[ToolResult]]`
+  to `Callable[..., Awaitable[ToolResult[Any]]]` to allow this, which does give up mypy's
+  ability to check a tool's arity/parameter names against its schema — that check now lives in
+  `app/tests/test_agent_registry.py::test_registry_function_signatures_match_schema_properties`
+  instead, a runtime replacement for the lost static guarantee. `get_persons_open_issues` itself
+  resolves a free-text name/email against Jira's `/rest/api/3/user/search` endpoint (note: this
+  endpoint returns a **bare JSON array**, unlike every other Jira endpoint this codebase calls,
+  which wrap results in `{"values": [...]}`) and, on a single unambiguous match, queries
+  `assignee = "<accountId>"` the same way `_UNRESOLVED_JQL` queries `currentUser()`. Zero or
+  multiple matches don't fail the tool call — they return `ok=True, data=[], note="..."` (the
+  same ambiguous-empty-result convention as the "did you mean Sprint X?" case above), so Claude
+  can ask a clarifying follow-up instead of surfacing a `warnings`-list failure for what's
+  really "be more specific." PR-linking is deliberately not wired in here — the existing linking
+  helper (`_fetch_raw_prs_by_issue_key`) is hardcoded to `settings.github_username`, i.e. "my"
+  authored PRs only.
+
+- **`get_issues_awaiting_my_response()`** is the "someone's waiting on your reply" signal. The
+  rule is specifically **a comment that @-mentions me, with no comment by me since** — not the
+  broader "the last comment on the ticket isn't mine," which was considered and rejected because
+  someone else's comment is very often the resolution to a thread, not a question aimed at the
+  user. `_adf_contains_mention()` walks a comment's Atlassian Document Format body the same way
+  the existing `_adf_text()` walks a description; `_awaiting_response()` then walks a comment
+  list in chronological order (`JiraClient.get_comments()` passes `orderBy=created` precisely so
+  this ordering can be trusted) and keeps a single `awaiting` flag: a comment authored by me
+  clears it, a comment mentioning me sets it — regardless of who comments after, which is the
+  exact distinction from the rejected rule. This is deliberately its own dedicated tool rather
+  than a new field on `RawIssue`/an input to `score_issue()` — folding it into ranking would mean
+  fetching every issue's comments on *every* existing tool call (`get_my_high_priority_issues`,
+  `get_issues_without_prs`, etc.), not just when this specific signal is asked for. Cross-tool
+  synthesis (weaving "AL-13 needs your reply" into the `Focus:` line) is left to
+  `SYSTEM_PROMPT`, the same way the model already combines high-priority issues, overdue items,
+  and PR review requests into one recommendation today — no new Python ranking code combines
+  this signal with anything else.
+
+- **`draft_comment(issue_key, note_text)` / `post_comment(issue_key, note_text)`** implement the
+  codebase's first Jira **write**. They are split on purpose: `draft_comment` is registered in
+  `TOOL_REGISTRY`/`TOOL_SCHEMAS` and is the only way the orchestrator's tool-calling loop ever
+  touches this feature — it performs **zero Jira I/O**, just packaging the issue key and the
+  user's own note text into a `CommentDraft` (`app/core/models.py`), which
+  `orchestrator.dispatch()` captures into `AskResponse.pending_comment_draft` (mirroring the
+  existing `known_issues`/`known_prs` mutable-accumulator pattern already used for
+  `referenced_issues`/`referenced_prs`). `post_comment` is **not** registered as a tool at all —
+  it wraps the actual `POST /rest/api/3/issue/{key}/comment` call
+  (`JiraClient.add_comment()`, the client's first mutating method and its only uncached one) and
+  is only ever invoked by `app/cli.py`'s `_confirm_and_post_comment()` (a y/n prompt, same
+  `asyncio.to_thread(input, ...)` pattern as the free-form query prompt) or
+  `app/slack/bolt_app.py`'s `ask_confirm_comment` action handler, both *after* an explicit human
+  confirmation — the LLM can draft a note but can never post one. This mirrors the existing
+  `devhelp standup` / Slack standup-summary-button precedent of bypassing the LLM entirely for a
+  deterministic action, just applied to a write instead of a read. The Slack confirm button
+  (`app/slack/formatting.py:_comment_draft_blocks`) is the first button in this codebase to carry
+  a `value` payload at all (`json.dumps({"issue_key": ..., "note_text": ...})`, decoded via
+  `body["actions"][0]["value"]`) — every earlier button either opened a `url` client-side or had
+  its handler re-derive everything from `body["message"]`. `SYSTEM_PROMPT` tells Claude to never
+  claim the comment has been posted after calling `draft_comment` — the actual write happens
+  entirely outside the model's control. `_plain_text_to_adf()` splits the note on `"\n"` into one
+  ADF paragraph node per line - ADF has no notion of a raw newline inside a single text node, so
+  packing a multi-line note into one text leaf would silently render as one run-on line in Jira.
+  After a successful (or failed) post, `handle_confirm_comment` calls Bolt's injected `respond()`
+  with `replace_original=True` to strip the buttons and show the outcome in place - closing the
+  double-click-to-double-post window without needing `chat.update`'s extra scope. This can't be a
+  bare `respond(text=...)`, though: the draft's 3 blocks (divider/section/actions, each tagged
+  with a `comment_draft_*` `block_id` in `_comment_draft_blocks`) live inside the *same* message
+  as the main answer and the standup-followup prompt - `format_ask_response` posts everything in
+  one combined `say()` call. `replace_comment_draft_blocks()` (`app/slack/formatting.py`) swaps
+  out only the 3 tagged blocks for a single outcome line, so `respond()` can safely
+  `replace_original` without wiping the answer text or the standup buttons sitting in the same
+  message. (An earlier version of this fix called `respond(replace_original=True, text=...)` with
+  no `blocks` at all, which would have replaced the *entire* message - caught in a later
+  self-review pass before being committed.)
+
+  Known accepted gaps, not fixed: a real-but-wrong issue key is only caught by the human reading
+  the confirmation prompt/button, not by code (same class of prompt-level-only rule as the
+  system prompt's "no PR started" phrasing rule); `GET .../comment` is paginated
+  (`maxResults=50` default), so an issue with more than 50 comments would only have its first
+  page inspected by `get_issues_awaiting_my_response`.
+
 ### CLI
 
-`app/cli.py` is a third interface onto the same `orchestrator.handle_query()` used by `/ask`
-and the Slack @-mention path (`app/slack/bolt_app.py:handle_mention`) — deliberately not a
-fourth reimplementation of the tool-calling loop. Installed as the `devhelp` console script
+`app/cli.py` is a third interface onto the same orchestrator used by `/ask` and the Slack
+@-mention path (`app/slack/bolt_app.py:handle_mention`) — deliberately not a fourth
+reimplementation of the tool-calling loop. Installed as the `devhelp` console script
 (`[project.scripts]` in `pyproject.toml`, `app.cli:run`), so it runs without `uvicorn` and
 without any Slack config. `main(argv)` joins the positional `query` args into one string if any
-were given; if not, it prompts (`Ask: `) and reads one instead — deliberately, since typed
-terminal input isn't parsed by the shell the way argv is, so a query containing `?`/`*`
-(zsh/bash glob characters) never breaks. That prompt read goes through `asyncio.to_thread`
-rather than a bare `input()` call, since `main()` is a coroutine and a blocking call would stall
-the event loop (`ruff`'s `ASYNC250` catches a bare one). `main` prints `response.answer` to
-stdout and each `response.warnings` entry to stderr — mirroring `/ask`'s partial-degradation
-behavior (a failed tool call degrades the answer rather than failing the whole request) rather
-than treating a warning as fatal. Two non-zero exit paths: `2` for an empty query (either no
-args and a blank/EOF prompt response), mirroring argparse's own convention for a usage error;
-`1` for `OrchestratorUnavailable` (the Anthropic call itself failing), which prints a sanitized
-message to stderr rather than the raw exception — there's no partial answer to fall back to
-either way, but the two are kept distinct since one is a user-input problem and the other is a
-backend failure. For free-form questions, `cli.py` goes through the LLM orchestrator the same
-way `/ask` does (never calls `app/tools/*` directly for that path), so it gets the same tool
-selection and prioritized-summary behavior, not just a raw dump of one tool's data.
+were given (the single-shot path, `handle_query()`, unchanged since the CLI's first version);
+if not, it hands off to `_prompt_loop()` instead of running one prompt-and-exit. Direct-argument
+invocation exists precisely so typed input never gets parsed by the shell the way argv is, so a
+query containing `?`/`*` (zsh/bash glob characters) never breaks either way you invoke it. Every
+`input()` call (in both paths) goes through `asyncio.to_thread` rather than a bare call, since
+`main()`/`_prompt_loop()` are coroutines and a blocking call would stall the event loop (`ruff`'s
+`ASYNC250` catches a bare one). `_render_answer()` (shared by both paths, so their printing can't
+drift apart) prints `response.answer` to stdout and each `response.warnings` entry to stderr —
+mirroring `/ask`'s partial-degradation behavior (a failed tool call degrades the answer rather
+than failing the whole request) rather than treating a warning as fatal. The single-shot path's
+two non-zero exit codes are unchanged: `2` for a blank/whitespace-only query passed as args
+(mirroring argparse's own convention for a usage error), `1` for `OrchestratorUnavailable` (the
+Anthropic call itself failing) — a sanitized message goes to stderr rather than the raw
+exception, since there's no partial answer to fall back to either way, but the two stay distinct
+since one is a user-input problem and the other is a backend failure. For free-form questions,
+`cli.py` goes through the LLM orchestrator the same way `/ask` does (never calls `app/tools/*`
+directly for that path), so it gets the same tool selection and prioritized-summary behavior,
+not just a raw dump of one tool's data.
+
+**Persistent no-args session** (`_prompt_loop()`): running `devhelp` with no arguments at all no
+longer answers one question and exits — it opens a session that keeps
+`orchestrator.handle_conversational_query()`'s returned `history` in a plain local variable and
+threads it into the next call, so a follow-up like "does that one have a due date?" resolves
+against the prior answer without repeating the ticket key (verified live against the real
+Anthropic API, not just mocked tests). This was a deliberate, explicit reversal of this project's
+earlier stateless-per-call design (see "Continuing a conversation without a mention" under Slack
+Integration below for the matching Slack-side change and the shared history mechanism both rely
+on). A blank line, EOF (Ctrl-D), or typing `exit`/`quit` (case-insensitive) ends the session
+cleanly with exit code `0` — a deliberate behavior change from the single-shot path's `2`/blank
+handling, since a missing/quit answer to an already-open, otherwise-good session isn't a usage
+error the way a blank query passed as an argument is. An `OrchestratorUnavailable` mid-session
+prints the same sanitized warning as the single-shot path but **prompts again** rather than
+exiting `1` — a transient backend hiccup shouldn't force the user to restart the whole session
+and lose its history. `devhelp "<query>"` (direct arguments) is untouched by any of this — still
+exactly one `handle_query()` call, no history, same exit codes as before; this was an explicit
+locked decision so a script piping in one query never hangs waiting for more input. `devhelp
+standup` (below) is likewise unaffected — no LLM, no history, no loop, ever.
 
 `devhelp standup` is the one exception: passing exactly the single literal argument `"standup"`
 (checked before `_parse_args` even runs, since argparse's own subparsers mechanism would
@@ -336,12 +446,58 @@ Two independent entry points, neither of which changes `/ask`'s behavior:
 
 - **`app/slack/bolt_app.py`** (@-mention): a `slack_bolt.AsyncApp` running over Socket Mode
   (no public HTTPS endpoint or tunnel needed) inside the same process as `uvicorn`, started from
-  `app/main.py`'s `lifespan` handler. `handle_mention` calls the existing
-  `orchestrator.handle_query()` directly — no HTTP round-trip to the app's own `/ask` route —
-  and replies in-thread. This whole module constructs a real `AsyncApp` at import time using
-  `settings.slack_bot_token`, which raises if the token is falsy; `app/main.py` only imports it
-  from inside the `if settings.slack_bot_token and settings.slack_app_token:` branch, specifically
-  so the app boots identically to today when Slack isn't configured (the import is never reached).
+  `app/main.py`'s `lifespan` handler. `handle_mention` calls
+  `orchestrator.handle_conversational_query()` — no HTTP round-trip to the app's own `/ask`
+  route — and replies in-thread. This whole module constructs a real `AsyncApp` at import time
+  using `settings.slack_bot_token`, which raises if the token is falsy; `app/main.py` only
+  imports it from inside the `if settings.slack_bot_token and settings.slack_app_token:` branch,
+  specifically so the app boots identically to today when Slack isn't configured (the import is
+  never reached).
+- **Continuing a conversation without a mention** (`app/slack/bolt_app.py:handle_thread_reply`,
+  `_thread_histories`): a deliberate, explicit reversal of this project's earlier
+  stateless-per-call design (see the CLI's matching `_prompt_loop()` under the CLI section
+  above). `_thread_histories: dict[str, list[dict]]` is a module-level, in-memory-only dict
+  keyed by thread root `thread_ts`, holding exactly the same `history` shape
+  `orchestrator.handle_conversational_query()` consumes/returns. `handle_mention` now keys on
+  `event.get("thread_ts") or event["ts"]` rather than the bare `event["ts"]` it used before this
+  feature — **this also fixed a real, previously-untested bug**: replying to a second @-mention
+  inside an already-open thread used to reply with `thread_ts=event["ts"]` (the mention's own
+  timestamp), forking a visually-new thread instead of continuing the existing one;
+  `handle_standup_summary_request` (below) already had the correct `.get("thread_ts") or
+  ...["ts"]` pattern, this handler just hadn't matched it. A new `@slack_app.event("message")`
+  handler, `handle_thread_reply`, lets a plain reply continue a tracked thread with no re-mention
+  needed (the locked design choice over the more conservative "must @-mention every time"
+  alternative) — it's gated on four checks, each closing a real gap, not defensive padding:
+  (1) `event.get("subtype") not in (None, "thread_broadcast")` excludes edits/deletes/joins while
+  *keeping* `thread_broadcast` ("also send to channel") replies, which are legitimate and would
+  otherwise be silently dropped by a blanket subtype exclusion; (2) `event.get("user") ==
+  context.get("bot_user_id")` (Bolt injects `context["bot_user_id"]` automatically for any
+  listener naming a `context` parameter, same as this file's existing `ack`/`body`/`respond`
+  injection) skips the bot's own posted messages; (3) `thread_ts not in _thread_histories` skips
+  any thread this bot didn't itself start via a mention - a plain reply to an unrelated thread is
+  never answered; (4) `_mentions_bot()` skips a message that mentions the bot, because **Slack
+  delivers both `app_mention` and `message.channels` events for the same mentioning message** -
+  without this check, a mention inside a tracked thread would get two replies, one from each
+  handler. Requires the `message.channels` (+ `.groups`/`.im`/`.mpim` variants) Event Subscription
+  and `channels:history` (+ matching variants) OAuth scope, neither of which this project needed
+  before - see README's Slack setup steps, including the "reinstall after adding a scope"
+  requirement Slack itself enforces. `_thread_histories` is unbounded in the *number* of threads
+  tracked over the process's lifetime (each thread's own history is separately capped by
+  `orchestrator.MAX_HISTORY_TURNS`) and is lost on process restart - both accepted limitations,
+  consistent with this being a local, single-user tool with no eviction machinery anywhere else
+  either. Both handlers funnel through a shared `_answer_and_reply()` guarded by a per-thread
+  `asyncio.Lock` (`_thread_locks`, keyed the same way as `_thread_histories`) - **not** just a
+  defensive measure. Socket Mode dispatches every incoming event as its own concurrent
+  `asyncio` task (confirmed directly in the installed `slack_sdk` package, not assumed), so two
+  messages landing in the same thread close together - a quick follow-up correction, or the same
+  message's `app_mention` and `message` events both reaching their handlers - would otherwise
+  both read the same pre-update history and the slower write would silently clobber the faster
+  one, dropping a whole exchange from what the thread remembers from then on. This was caught in
+  a self-review pass, not the original test suite (a test that awaits handlers one at a time
+  can't reproduce two genuinely concurrent tasks); `test_answer_and_reply_serializes_concurrent_calls_to_the_same_thread`
+  in `test_slack_bolt_app.py` exercises the two real handlers concurrently via `asyncio.gather`
+  specifically to catch a regression here, and was confirmed to actually fail without the lock
+  (not just pass trivially) before being kept.
 - **`scripts/post_digest.py`** (scheduled digest): a standalone script, *not* triggered by
   anything inside the long-running FastAPI process — it imports `app.tools.jira_tools` and
   `app.slack.digest`/`formatting` directly and is meant to be run by `launchd` (see README's
@@ -376,15 +532,29 @@ Two independent entry points, neither of which changes `/ask`'s behavior:
   `get_my_high_priority_issues()` — the PR-annotated tool, specifically so a "Doing" issue's
   still-open PR comes along with it) and `github_tools.get_prs_awaiting_my_review()`
   directly, then posts a reply in the same thread. Buttons over free text was a deliberate
-  choice: a free-text follow-up ("yes, give me the short version") would need thread-scoped
-  conversation memory (`thread_ts` → prior messages), which nothing in this codebase has — a
-  button click carries enough intent on its own, no memory required. Three sections:
+  choice made when this feature shipped: a free-text follow-up ("yes, give me the short
+  version") would need thread-scoped conversation memory (`thread_ts` → prior messages), which
+  nothing in this codebase had at the time — a button click carried enough intent on its own, no
+  memory required. **That premise changed** once `_thread_histories` (below, under "Continuing a
+  conversation without a mention") was added — thread-scoped memory now exists — but the button
+  choice here still stands on its own merits (an explicit action is unambiguous in a way a
+  short reply like "yes" isn't, and costs nothing extra now that memory exists anyway), so this
+  wasn't revisited. Three sections:
   `Doing` (issues from that fetch filtered to High/Highest priority — uncapped, so someone
   with 6 high-priority issues in flight sees all 6, not a truncated 4), `Reviewing` (PRs
   awaiting review, unchanged), `Next Up` (backfilled from the same ranked fetch, excluding
   whatever's already in `Doing`, only when `Doing + Reviewing` together total fewer than 2 -
   keeps a thin day from reading as a single bare bullet without padding a busy one). No tool
   currently tracks "completed since yesterday," so there's no `Done` section.
+- **Draft-comment confirm buttons** (`app/slack/formatting.py:_comment_draft_blocks`): when
+  `AskResponse.pending_comment_draft` is set, `format_ask_response` inserts a section showing the
+  drafted issue key + note text plus two buttons — `"Post to Jira"` (`ask_confirm_comment`,
+  carrying the issue key/note text as a JSON `value` payload — the first button in this codebase
+  to carry one at all) and `"Discard"` (`ask_discard_comment_draft`, bound to the shared
+  `_ack_only` handler like the other purely-acknowledged buttons). `bolt_app.py`'s
+  `handle_confirm_comment` is the only code path in the whole app that ever calls
+  `jira_tools.post_comment()` from Slack — see "Cross-User Lookups and the Draft/Confirm Write
+  Path" above for the full design.
 - **`/ask` answer enrichment** (`app/slack/formatting.py:format_ask_response`): the
   orchestrator's `SYSTEM_PROMPT` instructs Claude to write Slack mrkdwn directly (single-
   asterisk bold, `•` bullets, no markdown links) and to lead with a bolded `*Focus: ...*`
@@ -448,6 +618,20 @@ Two independent entry points, neither of which changes `/ask`'s behavior:
 ---
 
 ## Troubleshooting
+
+**A Slack thread reply gets answered twice — once from a bare reply, once seemingly duplicated:**
+- Slack delivers *both* the `app_mention` event and a `message.channels` (or `.groups`/`.im`/
+  `.mpim`) event for a single message that mentions the bot. `app/slack/bolt_app.py`'s
+  `handle_thread_reply` guards against this via `_mentions_bot()` — if you see a double reply,
+  check that guard hasn't been bypassed (e.g. a mention token format Slack sends that
+  `_MENTION_TOKEN` doesn't match) rather than assuming it's an ack/retry issue.
+
+**Slack conversation continuation appears to have "forgotten" everything after a redeploy or
+restart, and the CLI's persistent session obviously doesn't survive between separate invocations:**
+- Both are in-memory only, by design (`_thread_histories` in `bolt_app.py`, the CLI's local
+  `history` variable in `_prompt_loop()`) — there is no database or file-backed persistence for
+  conversation history anywhere in this project. This is an accepted limitation for a local,
+  single-user tool, not a bug to chase.
 
 **`ruff`/`mypy`/`pytest` hooks fail with "command not found":**
 - The `.venv` hasn't been created yet, or dependencies aren't installed — run the one-time
@@ -519,6 +703,14 @@ detail (by design — see `sanitize_error()`):**
   between the mocked shape and what Jira actually returns. When adding new Jira fields to
   `Issue`, verify against a live call (`curl localhost:8000/ask ...` with real credentials), not
   just the mocked test suite.
+
+**`get_persons_open_issues` (or anything else calling `JiraClient.search_users`) fails to parse
+a response, or a `["values"]`-style unwrap raises `KeyError`/`TypeError`:**
+- Unlike every other Jira endpoint this codebase calls (`search`, `get_boards`, `_get_sprints`,
+  all of which wrap results in `{"values": [...]}` or `{"issues": [...]}`),
+  `GET /rest/api/3/user/search` returns a **bare JSON array** at the top level. `search_users()`
+  deliberately does not unwrap anything — if a future change to this method adds a `["values"]`
+  lookup by analogy with the other client methods, that's the bug to look for.
 
 **The daily Slack digest doesn't seem to be posting, or posted once and then stopped:**
 - `launchd` plists (per the README's Slack Integration section) live in

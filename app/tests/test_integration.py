@@ -111,3 +111,49 @@ async def test_partial_failure_flows_end_to_end_through_the_real_api(monkeypatch
         block for block in tool_result_blocks if block["tool_use_id"] == "call_2"
     )
     assert github_result.get("is_error") is True
+
+
+async def test_draft_comment_flows_end_to_end_without_ever_posting_to_jira(
+    monkeypatch,
+):
+    # Proves the draft/confirm split holds through the real registry and
+    # dispatch(), not just in a mocked unit test: jira_draft_comment is
+    # called through the real orchestrator loop, and respx (mocking no POST
+    # route at all) would raise if anything tried to actually write to Jira.
+    tool_use = FakeToolUseBlock(
+        "call_1",
+        "jira_draft_comment",
+        {"issue_key": "AL-13", "note_text": "quick thought here"},
+    )
+    first_response = FakeResponse([tool_use], "tool_use")
+    final_response = FakeResponse(
+        [FakeTextBlock("I've drafted a note for AL-13.")], "end_turn"
+    )
+
+    call_count = {"n": 0}
+
+    async def fake_create_sequenced(**kwargs):
+        call_count["n"] += 1
+        return first_response if call_count["n"] == 1 else final_response
+
+    monkeypatch.setattr(
+        orchestrator.anthropic_client.messages, "create", fake_create_sequenced
+    )
+
+    with respx.mock:
+        from app.main import app
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/ask", json={"query": "add a note to AL-13: quick thought here"}
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pending_comment_draft"] == {
+        "issue_key": "AL-13",
+        "note_text": "quick thought here",
+    }

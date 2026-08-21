@@ -3,9 +3,13 @@ import asyncio
 import re
 import sys
 
-from app.agent.orchestrator import OrchestratorUnavailable, handle_query
+from app.agent.orchestrator import (
+    OrchestratorUnavailable,
+    handle_conversational_query,
+    handle_query,
+)
 from app.core.errors import unwrap_tool_result
-from app.core.models import Issue, PullRequest
+from app.core.models import AskResponse, CommentDraft, Issue, PullRequest
 from app.core.ranking import priority_emoji
 from app.core.text import apply_outside_links, jira_issue_url
 from app.slack.digest import StandupSummary, build_standup_summary
@@ -126,6 +130,30 @@ def _print_standup_summary(summary: StandupSummary, *, hyperlink: bool) -> None:
             print(f"  {_issue_line(issue, hyperlink=hyperlink)}")
 
 
+# Prints the drafted note, asks for explicit confirmation, and only then
+# calls jira_tools.post_comment() - the actual Jira write. EOFError is
+# treated as "declined," not as the query prompt's blank-input case, since a
+# missing confirmation for an already-successful answer isn't a usage error
+# (exit code stays 0 either way, unlike the query prompt's EOFError -> 2).
+async def _confirm_and_post_comment(draft: CommentDraft) -> None:
+    print()
+    print(f"Draft comment for {draft.issue_key}:")
+    print(f'  "{draft.note_text}"')
+    try:
+        raw_answer = await asyncio.to_thread(input, "Post this to Jira? [y/N]: ")
+        answer = raw_answer.strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in ("y", "yes"):
+        print("Comment not posted.")
+        return
+    result = await jira_tools.post_comment(draft.issue_key, draft.note_text)
+    if result.ok:
+        print(f"Comment posted to {draft.issue_key}.")
+    else:
+        print(f"warning: could not post comment: {result.error}", file=sys.stderr)
+
+
 # Mirrors app/slack/bolt_app.py:handle_standup_summary_request - bypasses the
 # LLM entirely and calls the same two tools directly, same as the Slack button.
 async def _run_standup(*, hyperlink: bool) -> int:
@@ -141,6 +169,55 @@ async def _run_standup(*, hyperlink: bool) -> int:
     )
     _print_standup_summary(summary, hyperlink=hyperlink)
     return 0
+
+
+# Shared by the single-shot (direct-args) and persistent-loop (no-args)
+# paths, so answer/warning/comment-draft-confirm handling can't drift between
+# them - folding the draft-confirm step in here too (not left as a separate
+# call each caller has to remember) is what keeps that guarantee complete.
+async def _render_answer(response: AskResponse, *, hyperlink: bool) -> None:
+    answer = response.answer
+    if hyperlink:
+        answer = _hyperlink_prs(answer, response.referenced_prs)
+        answer = _hyperlink_issues(answer, response.referenced_issues)
+    print(answer)
+    for warning in response.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    if response.pending_comment_draft is not None:
+        await _confirm_and_post_comment(response.pending_comment_draft)
+
+
+_SESSION_END_WORDS = {"exit", "quit"}
+
+
+# Only reached from main() when devhelp is run with no arguments at all -
+# `devhelp "some query"` stays single-shot (see main()) so a script piping in
+# one query never hangs waiting for more input. Session-scoped `history` is
+# plain in-memory Python state (mirrors app/slack/bolt_app.py's
+# _thread_histories) - lost once the process exits, by design ("until it is
+# closed").
+async def _prompt_loop(*, hyperlink: bool) -> int:
+    history: list[dict] | None = None
+    while True:
+        try:
+            raw_query = await asyncio.to_thread(input, "Ask: ")
+        except EOFError:
+            return 0
+        query = raw_query.strip()
+        if not query or query.lower() in _SESSION_END_WORDS:
+            return 0
+        print()  # blank line between the "Ask: ..." prompt and the answer
+
+        try:
+            response, history = await handle_conversational_query(query, history)
+        except OrchestratorUnavailable:
+            # A transient backend failure shouldn't end an otherwise-good
+            # session - only blank/EOF/exit/quit do that (see loop exits
+            # above), so prompt again rather than returning.
+            print("assistant temporarily unavailable", file=sys.stderr)
+            continue
+
+        await _render_answer(response, hyperlink=hyperlink)
 
 
 async def main(argv: list[str]) -> int:
@@ -161,16 +238,10 @@ async def main(argv: list[str]) -> int:
         return await _run_standup(hyperlink=hyperlink)
 
     args = _parse_args(argv)
-    if args.query:
-        query = " ".join(args.query).strip()
-    else:
-        try:
-            query = (await asyncio.to_thread(input, "Ask: ")).strip()
-        except EOFError:
-            query = ""
-        if query:
-            print()  # blank line between the "Ask: ..." prompt and the answer
+    if not args.query:
+        return await _prompt_loop(hyperlink=hyperlink)
 
+    query = " ".join(args.query).strip()
     if not query:
         print("no query given", file=sys.stderr)
         return 2
@@ -181,13 +252,7 @@ async def main(argv: list[str]) -> int:
         print("assistant temporarily unavailable", file=sys.stderr)
         return 1
 
-    answer = response.answer
-    if hyperlink:
-        answer = _hyperlink_prs(answer, response.referenced_prs)
-        answer = _hyperlink_issues(answer, response.referenced_issues)
-    print(answer)
-    for warning in response.warnings:
-        print(f"warning: {warning}", file=sys.stderr)
+    await _render_answer(response, hyperlink=hyperlink)
     return 0
 
 

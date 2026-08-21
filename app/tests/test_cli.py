@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import app.cli as cli_module
 from app.agent.orchestrator import OrchestratorUnavailable
-from app.core.models import AskResponse, Issue, PullRequest, ToolResult
+from app.core.models import AskResponse, CommentDraft, Issue, PullRequest, ToolResult
 
 
 def _issue(key: str, *, priority: str = "High") -> Issue:
@@ -16,6 +16,19 @@ def _issue(key: str, *, priority: str = "High") -> Issue:
         has_linked_pr=False,
         priority_score=0.0,
     )
+
+
+def _input_side_effect(answers: list[str]):
+    """A `builtins.input` stand-in that returns each answer in turn, matching
+    the persistent prompt loop's real usage (one input() call per turn) -
+    a fixed-return lambda would loop forever once main() stops exiting after
+    one query."""
+    iterator = iter(answers)
+
+    def _input(prompt: str) -> str:
+        return next(iterator)
+
+    return _input
 
 
 def _pr(number: int = 514) -> PullRequest:
@@ -82,26 +95,41 @@ async def test_main_returns_one_on_orchestrator_unavailable(monkeypatch, capsys)
 
 
 async def test_main_prompts_when_no_query_given(monkeypatch, capsys):
-    mock_handle_query = AsyncMock(
-        return_value=AskResponse(answer="answer", tool_calls=[], warnings=[])
+    mock_handle_conversational_query = AsyncMock(
+        return_value=(
+            AskResponse(answer="answer", tool_calls=[], warnings=[]),
+            [],
+        )
     )
-    monkeypatch.setattr(cli_module, "handle_query", mock_handle_query)
     monkeypatch.setattr(
-        "builtins.input", lambda prompt: "what should I work on today?"
+        cli_module, "handle_conversational_query", mock_handle_conversational_query
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        _input_side_effect(["what should I work on today?", ""]),
     )
 
     exit_code = await cli_module.main([])
 
     assert exit_code == 0
-    mock_handle_query.assert_awaited_once_with("what should I work on today?")
+    mock_handle_conversational_query.assert_awaited_once_with(
+        "what should I work on today?", None
+    )
 
 
 async def test_main_prints_blank_line_after_prompt_before_answer(monkeypatch, capsys):
-    mock_handle_query = AsyncMock(
-        return_value=AskResponse(answer="*Focus: AL-12*", tool_calls=[], warnings=[])
+    mock_handle_conversational_query = AsyncMock(
+        return_value=(
+            AskResponse(answer="*Focus: AL-12*", tool_calls=[], warnings=[]),
+            [],
+        )
     )
-    monkeypatch.setattr(cli_module, "handle_query", mock_handle_query)
-    monkeypatch.setattr("builtins.input", lambda prompt: "what should I work on?")
+    monkeypatch.setattr(
+        cli_module, "handle_conversational_query", mock_handle_conversational_query
+    )
+    monkeypatch.setattr(
+        "builtins.input", _input_side_effect(["what should I work on?", ""])
+    )
 
     exit_code = await cli_module.main([])
 
@@ -109,16 +137,20 @@ async def test_main_prints_blank_line_after_prompt_before_answer(monkeypatch, ca
     assert capsys.readouterr().out == "\n*Focus: AL-12*\n"
 
 
-async def test_main_returns_two_on_blank_prompt_input(monkeypatch, capsys):
-    mock_handle_query = AsyncMock()
-    monkeypatch.setattr(cli_module, "handle_query", mock_handle_query)
+async def test_main_returns_zero_and_ends_session_on_blank_prompt_input(
+    monkeypatch, capsys
+):
+    mock_handle_conversational_query = AsyncMock()
+    monkeypatch.setattr(
+        cli_module, "handle_conversational_query", mock_handle_conversational_query
+    )
     monkeypatch.setattr("builtins.input", lambda prompt: "   ")
 
     exit_code = await cli_module.main([])
 
-    assert exit_code == 2
-    mock_handle_query.assert_not_awaited()
-    assert "no query given" in capsys.readouterr().err
+    assert exit_code == 0
+    mock_handle_conversational_query.assert_not_awaited()
+    assert capsys.readouterr().err == ""
 
 
 async def test_main_returns_two_on_whitespace_only_query_args(monkeypatch, capsys):
@@ -132,18 +164,117 @@ async def test_main_returns_two_on_whitespace_only_query_args(monkeypatch, capsy
     assert "no query given" in capsys.readouterr().err
 
 
-async def test_main_returns_two_on_eof_at_prompt(monkeypatch, capsys):
+async def test_main_returns_zero_and_ends_session_on_eof_at_prompt(monkeypatch, capsys):
     def _raise_eof(prompt: str) -> str:
         raise EOFError
 
-    mock_handle_query = AsyncMock()
-    monkeypatch.setattr(cli_module, "handle_query", mock_handle_query)
+    mock_handle_conversational_query = AsyncMock()
+    monkeypatch.setattr(
+        cli_module, "handle_conversational_query", mock_handle_conversational_query
+    )
     monkeypatch.setattr("builtins.input", _raise_eof)
 
     exit_code = await cli_module.main([])
 
-    assert exit_code == 2
-    mock_handle_query.assert_not_awaited()
+    assert exit_code == 0
+    mock_handle_conversational_query.assert_not_awaited()
+
+
+async def test_main_prompt_loop_carries_history_across_turns(monkeypatch, capsys):
+    response1 = AskResponse(answer="first answer", tool_calls=[], warnings=[])
+    response2 = AskResponse(answer="second answer", tool_calls=[], warnings=[])
+    history_after_1 = [{"role": "user", "content": "first query"}]
+    history_after_2 = [
+        {"role": "user", "content": "first query"},
+        {"role": "user", "content": "second query"},
+    ]
+    mock_handle_conversational_query = AsyncMock(
+        side_effect=[(response1, history_after_1), (response2, history_after_2)]
+    )
+    monkeypatch.setattr(
+        cli_module, "handle_conversational_query", mock_handle_conversational_query
+    )
+    monkeypatch.setattr(
+        "builtins.input", _input_side_effect(["first query", "second query", ""])
+    )
+
+    exit_code = await cli_module.main([])
+
+    assert exit_code == 0
+    first_call, second_call = mock_handle_conversational_query.await_args_list
+    assert first_call.args == ("first query", None)
+    assert second_call.args == ("second query", history_after_1)
+    out = capsys.readouterr().out
+    assert "first answer" in out
+    assert "second answer" in out
+
+
+async def test_main_prompt_loop_exits_on_exit_or_quit_case_insensitively(
+    monkeypatch, capsys
+):
+    mock_handle_conversational_query = AsyncMock()
+    monkeypatch.setattr(
+        cli_module, "handle_conversational_query", mock_handle_conversational_query
+    )
+    monkeypatch.setattr("builtins.input", _input_side_effect(["EXIT"]))
+
+    exit_code = await cli_module.main([])
+
+    assert exit_code == 0
+    mock_handle_conversational_query.assert_not_awaited()
+
+
+async def test_main_prompt_loop_continues_after_orchestrator_unavailable(
+    monkeypatch, capsys
+):
+    mock_handle_conversational_query = AsyncMock(
+        side_effect=OrchestratorUnavailable("boom")
+    )
+    monkeypatch.setattr(
+        cli_module, "handle_conversational_query", mock_handle_conversational_query
+    )
+    monkeypatch.setattr("builtins.input", _input_side_effect(["bad query", "exit"]))
+
+    exit_code = await cli_module.main([])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "assistant temporarily unavailable" in captured.err
+    assert "boom" not in captured.err
+
+
+async def test_main_prompt_loop_confirms_and_posts_comment_draft_mid_session(
+    monkeypatch, capsys
+):
+    draft = CommentDraft(issue_key="AL-13", note_text="quick thought here")
+    mock_handle_conversational_query = AsyncMock(
+        return_value=(
+            AskResponse(
+                answer="Drafted a note for AL-13.",
+                tool_calls=["jira_draft_comment"],
+                warnings=[],
+                pending_comment_draft=draft,
+            ),
+            [],
+        )
+    )
+    monkeypatch.setattr(
+        cli_module, "handle_conversational_query", mock_handle_conversational_query
+    )
+    mock_post_comment = AsyncMock(
+        return_value=ToolResult(ok=True, data="1", error=None)
+    )
+    monkeypatch.setattr(cli_module.jira_tools, "post_comment", mock_post_comment)
+    # 3 input() calls: the query prompt, the [y/N] confirm prompt, then "exit".
+    monkeypatch.setattr(
+        "builtins.input", _input_side_effect(["add a note to AL-13", "y", "exit"])
+    )
+
+    exit_code = await cli_module.main([])
+
+    assert exit_code == 0
+    mock_post_comment.assert_awaited_once_with("AL-13", "quick thought here")
+    assert "Comment posted to AL-13." in capsys.readouterr().out
 
 
 async def test_main_standup_prints_doing_and_reviewing_sections(monkeypatch, capsys):
@@ -391,3 +522,118 @@ async def test_main_standup_hyperlinks_when_stdout_is_a_tty(monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "\033]8;;" in out
     assert cli_module.jira_issue_url("AL-1") in out
+
+
+async def test_main_prompts_to_confirm_comment_draft_and_posts_on_yes(
+    monkeypatch, capsys
+):
+    draft = CommentDraft(issue_key="AL-13", note_text="quick thought here")
+    mock_handle_query = AsyncMock(
+        return_value=AskResponse(
+            answer="Drafted a note for AL-13.",
+            tool_calls=["jira_draft_comment"],
+            warnings=[],
+            pending_comment_draft=draft,
+        )
+    )
+    monkeypatch.setattr(cli_module, "handle_query", mock_handle_query)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    mock_post_comment = AsyncMock(
+        return_value=ToolResult(ok=True, data="1", error=None)
+    )
+    monkeypatch.setattr(cli_module.jira_tools, "post_comment", mock_post_comment)
+
+    exit_code = await cli_module.main(["add a note to AL-13"])
+
+    assert exit_code == 0
+    mock_post_comment.assert_awaited_once_with("AL-13", "quick thought here")
+    out = capsys.readouterr().out
+    assert "AL-13" in out
+    assert "Comment posted to AL-13." in out
+
+
+async def test_main_does_not_post_comment_draft_when_declined(monkeypatch, capsys):
+    draft = CommentDraft(issue_key="AL-13", note_text="quick thought here")
+    mock_handle_query = AsyncMock(
+        return_value=AskResponse(
+            answer="Drafted a note for AL-13.",
+            tool_calls=["jira_draft_comment"],
+            warnings=[],
+            pending_comment_draft=draft,
+        )
+    )
+    monkeypatch.setattr(cli_module, "handle_query", mock_handle_query)
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    mock_post_comment = AsyncMock()
+    monkeypatch.setattr(cli_module.jira_tools, "post_comment", mock_post_comment)
+
+    exit_code = await cli_module.main(["add a note to AL-13"])
+
+    assert exit_code == 0
+    mock_post_comment.assert_not_awaited()
+    assert "Comment not posted." in capsys.readouterr().out
+
+
+async def test_main_treats_eof_at_comment_confirm_prompt_as_declined(
+    monkeypatch, capsys
+):
+    draft = CommentDraft(issue_key="AL-13", note_text="quick thought here")
+    mock_handle_query = AsyncMock(
+        return_value=AskResponse(
+            answer="Drafted a note for AL-13.",
+            tool_calls=["jira_draft_comment"],
+            warnings=[],
+            pending_comment_draft=draft,
+        )
+    )
+    monkeypatch.setattr(cli_module, "handle_query", mock_handle_query)
+
+    def _raise_eof(prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _raise_eof)
+    mock_post_comment = AsyncMock()
+    monkeypatch.setattr(cli_module.jira_tools, "post_comment", mock_post_comment)
+
+    exit_code = await cli_module.main(["add a note to AL-13"])
+
+    assert exit_code == 0
+    mock_post_comment.assert_not_awaited()
+
+
+async def test_main_warns_on_stderr_when_post_comment_fails(monkeypatch, capsys):
+    draft = CommentDraft(issue_key="AL-13", note_text="quick thought here")
+    mock_handle_query = AsyncMock(
+        return_value=AskResponse(
+            answer="Drafted a note for AL-13.",
+            tool_calls=["jira_draft_comment"],
+            warnings=[],
+            pending_comment_draft=draft,
+        )
+    )
+    monkeypatch.setattr(cli_module, "handle_query", mock_handle_query)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    mock_post_comment = AsyncMock(
+        return_value=ToolResult(ok=False, data=None, error="404 Not Found")
+    )
+    monkeypatch.setattr(cli_module.jira_tools, "post_comment", mock_post_comment)
+
+    exit_code = await cli_module.main(["add a note to AL-13"])
+
+    assert exit_code == 0
+    assert "404 Not Found" in capsys.readouterr().err
+
+
+async def test_main_does_not_prompt_when_no_comment_draft(monkeypatch, capsys):
+    mock_handle_query = AsyncMock(
+        return_value=AskResponse(answer="answer", tool_calls=[], warnings=[])
+    )
+    monkeypatch.setattr(cli_module, "handle_query", mock_handle_query)
+    mock_post_comment = AsyncMock()
+    monkeypatch.setattr(cli_module.jira_tools, "post_comment", mock_post_comment)
+
+    exit_code = await cli_module.main(["status?"])
+
+    assert exit_code == 0
+    mock_post_comment.assert_not_awaited()
+    assert "Post this to Jira?" not in capsys.readouterr().out

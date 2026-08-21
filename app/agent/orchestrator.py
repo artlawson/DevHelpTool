@@ -10,7 +10,7 @@ from app.agent.registry import TOOL_REGISTRY
 from app.agent.schemas import TOOL_SCHEMAS
 from app.config import settings
 from app.core.errors import sanitize_error
-from app.core.models import AskResponse, Issue, PullRequest
+from app.core.models import AskResponse, CommentDraft, Issue, PullRequest
 
 MAX_ITERATIONS = 6
 MODEL = "claude-sonnet-5"
@@ -28,6 +28,26 @@ ticket keys, PR numbers, or counts. Produce a concise, prioritized summary, \
 not a restatement of raw tool output. If a tool result reports an error, \
 acknowledge the gap in your answer (e.g. "GitHub data is unavailable, \
 showing Jira only") rather than silently omitting it.
+
+When the user names a specific teammate and asks what they're working on, \
+call jira_get_persons_open_issues with that person's name or email exactly \
+as they said it - never answer that question from jira_get_my_* tools, \
+which are always scoped to the current user.
+
+Call jira_get_issues_awaiting_my_response on broad status questions (e.g. \
+"what should I work on today", "what's my status"). If it returns anything, \
+weave "someone's waiting on your reply on <key>" into your narration - and \
+into the Focus line when it's the most pressing thing - the same way you \
+already combine high-priority issues, overdue items, and PR review requests \
+into one coherent recommendation.
+
+When the user wants to leave a note on a ticket (e.g. they don't have time \
+to work on it but have a quick thought), call jira_draft_comment with the \
+exact literal issue key and the user's note text written close to what they \
+said, not your own summary of it. This does not post anything - a separate, \
+human-confirmed step outside your control handles the actual write. Never \
+tell the user the comment has been posted; at most, confirm you've drafted \
+it and that they'll be asked to approve it.
 
 Formatting rules for your final answer, no exceptions:
 - Use Slack's markup only, never standard Markdown: bold is a single \
@@ -102,16 +122,22 @@ def _record_referenced_data(
             known_prs[item.number] = item
 
 
+def _record_comment_draft(data: Any, draft_holder: list[CommentDraft]) -> None:
+    if isinstance(data, CommentDraft):
+        draft_holder.append(data)
+
+
 async def dispatch(
     block: Any,
     called_tools: list[str],
     warnings: list[str],
     known_issues: dict[str, Issue],
     known_prs: dict[int, PullRequest],
+    draft_holder: list[CommentDraft],
 ) -> dict:
     tool_fn = TOOL_REGISTRY[block.name]
     try:
-        result = await tool_fn()
+        result = await tool_fn(**block.input)
     except Exception as exc:
         message = sanitize_error(exc)
         warnings.append(f"{block.name}: {message}")
@@ -133,6 +159,7 @@ async def dispatch(
 
     called_tools.append(block.name)
     _record_referenced_data(result.data, known_issues, known_prs)
+    _record_comment_draft(result.data, draft_holder)
     payload = _serialize_tool_data(result.data)
     if result.note:
         payload = {"data": payload, "note": result.note}
@@ -143,12 +170,16 @@ async def dispatch(
     }
 
 
-async def handle_query(query: str) -> AskResponse:
-    messages: list[dict] = [{"role": "user", "content": query}]
+async def _run_loop(messages: list[dict]) -> tuple[AskResponse, list[dict]]:
+    """The tool-calling loop shared by handle_query (fresh, single-turn) and
+    handle_conversational_query (prior turns prepended into `messages`
+    already). Mutates and returns `messages` so a caller can carry the full
+    exchange forward as the next call's history."""
     warnings: list[str] = []
     called_tools: list[str] = []
     known_issues: dict[str, Issue] = {}
     known_prs: dict[int, PullRequest] = {}
+    draft_holder: list[CommentDraft] = []
 
     for iteration in range(MAX_ITERATIONS):
         force_final = iteration == MAX_ITERATIONS - 1
@@ -170,18 +201,27 @@ async def handle_query(query: str) -> AskResponse:
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason != "tool_use":
-            return AskResponse(
+            ask_response = AskResponse(
                 answer=extract_text(response.content),
                 tool_calls=called_tools,
                 warnings=warnings,
                 referenced_issues=list(known_issues.values()),
                 referenced_prs=list(known_prs.values()),
+                pending_comment_draft=draft_holder[-1] if draft_holder else None,
             )
+            return ask_response, messages
 
         tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
         results = await asyncio.gather(
             *[
-                dispatch(block, called_tools, warnings, known_issues, known_prs)
+                dispatch(
+                    block,
+                    called_tools,
+                    warnings,
+                    known_issues,
+                    known_prs,
+                    draft_holder,
+                )
                 for block in tool_use_blocks
             ]
         )
@@ -190,3 +230,45 @@ async def handle_query(query: str) -> AskResponse:
     # Unreachable in practice: the forced tool_choice="none" turn above
     # always returns stop_reason != "tool_use". Kept as a defensive guard.
     raise OrchestratorUnavailable("model did not produce a final answer")
+
+
+async def handle_query(query: str) -> AskResponse:
+    messages: list[dict] = [{"role": "user", "content": query}]
+    response, _ = await _run_loop(messages)
+    return response
+
+
+# Bounds token cost for a long-running Slack thread or CLI session - without
+# this, history grows every turn for as long as the conversation continues.
+MAX_HISTORY_TURNS = 5
+
+
+def _cap_history(messages: list[dict], max_turns: int) -> list[dict]:
+    """Keeps only the last `max_turns` complete turns. A turn boundary is a
+    user message whose content is a plain string (the query itself) - every
+    other message _run_loop appends (the assistant's response.content, or the
+    user-role tool_result followups) never has string content, so this can
+    never cut in the middle of a tool_use/tool_result exchange, which would
+    produce a sequence the Anthropic API would reject."""
+    boundaries = [
+        i
+        for i, message in enumerate(messages)
+        if message["role"] == "user" and isinstance(message["content"], str)
+    ]
+    if len(boundaries) <= max_turns:
+        return messages
+    return messages[boundaries[-max_turns] :]
+
+
+async def handle_conversational_query(
+    query: str, history: list[dict] | None = None
+) -> tuple[AskResponse, list[dict]]:
+    """Like handle_query, but prepends `history` (a prior call's returned
+    messages) so the model has the earlier turns of the conversation, and
+    returns the updated, capped history for the caller to pass into the next
+    call. Slack (per-thread) and the CLI (per-session) hold this in memory
+    between calls; `/ask` has no equivalent concept and stays on handle_query."""
+    messages = list(history) if history else []
+    messages.append({"role": "user", "content": query})
+    response, updated_messages = await _run_loop(messages)
+    return response, _cap_history(updated_messages, MAX_HISTORY_TURNS)

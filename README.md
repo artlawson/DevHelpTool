@@ -1,6 +1,6 @@
 # Engineering Productivity Agent
 
-A local FastAPI service that answers natural-language questions about your current engineering work — "what should I work on today?", "which high-priority Jira tickets don't have PRs?", "which of my tickets already have a matching PR?", "what's awaiting my review?" — by orchestrating a hand-rolled Claude tool-calling loop over the Jira and GitHub REST APIs.
+A local FastAPI service that answers natural-language questions about your current engineering work — "what should I work on today?", "which high-priority Jira tickets don't have PRs?", "which of my tickets already have a matching PR?", "what's awaiting my review?", "what is Sam working on?" — by orchestrating a hand-rolled Claude tool-calling loop over the Jira and GitHub REST APIs.
 
 Data is fetched and deterministically ranked in Python (priority, due date, review-request age); Claude's role is limited to deciding which tools to call and narrating the final answer — it never decides what's "important."
 
@@ -106,19 +106,28 @@ curl -X POST localhost:8000/ask \
 ### CLI
 
 A `devhelp` command is installed with the package (see Setup above) as a thin terminal wrapper
-over the same `orchestrator.handle_query()` used by `/ask` and the Slack @-mention — no FastAPI
-server needs to be running:
+over the same orchestrator used by `/ask` and the Slack @-mention — no FastAPI server needs to
+be running:
 
 ```bash
 devhelp
 Ask: what should I work on today?
+...
+Ask: does that top one have a due date?
+...
+Ask:
 ```
 
-Run it with no arguments and it prompts for the question — recommended, since typed input
-never goes through the shell's parser, so punctuation like `?` or `*` just works. You can also
-pass the query as arguments directly, but quote it so the shell (zsh in particular) doesn't try
-to glob-expand `?`/`*`: `devhelp "what should I work on today?"`. If the note above about
-iCloud/Desktop applies to you, substitute `python -m app.cli` for `devhelp` in either form.
+Run it with no arguments and it opens a **persistent session**: each answer stays in context for
+the next question (so "does that top one have a due date?" resolves correctly without repeating
+the ticket key), until you end it with a blank line, Ctrl-D, or typing `exit`/`quit`. Typed input
+never goes through the shell's parser either way, so punctuation like `?` or `*` just works.
+
+Passing the query as arguments instead stays single-shot — one answer, then exit, no persistent
+context — which is what you want from a script or a one-off shell command: `devhelp "what should
+I work on today?"` (quote it so the shell, zsh in particular, doesn't try to glob-expand `?`/`*`).
+If the note above about iCloud/Desktop applies to you, substitute `python -m app.cli` for
+`devhelp` in either form.
 
 `devhelp standup` (that one word, nothing else) prints the same Doing/Reviewing/Next Up summary
 as Slack's standup-summary button — it bypasses the LLM entirely and calls the same two tools
@@ -139,9 +148,34 @@ kitty, Windows Terminal, VS Code's integrated terminal). Piped or redirected out
 (`devhelp standup > log.txt`, `devhelp ... | grep ...`) automatically falls back to plain text —
 this is detected per run via `sys.stdout.isatty()`, not a setting.
 
-The answer prints to stdout; any tool-call warnings print to stderr and the exit code stays
-`0` (partial-failure degradation, same as `/ask`). If the Anthropic call itself fails, it
-prints an error to stderr and exits `1`.
+Each answer prints to stdout; any tool-call warnings print to stderr. In the persistent
+no-args session, a blank line/Ctrl-D/`exit`/`quit` always exits `0`, and a failed Anthropic call
+mid-session just prints a warning and prompts again rather than ending the session. In the
+single-shot (direct-argument) form, a blank/whitespace-only query exits `2`, and a failed
+Anthropic call exits `1` — both end the process immediately, since there's no session to keep
+open.
+
+### Leaving a note on a ticket
+
+If you ask a question and mention you don't have time for a ticket but have a quick thought on
+it ("I don't have time for AL-16 right now, but a quick thought: ..."), the assistant drafts a
+Jira **comment** (never edits the ticket's description) and always asks you to confirm before
+anything is actually posted — nothing is written to Jira without an explicit yes:
+
+```
+devhelp "I don't have time for AL-16, but a quick thought: add a before/after comparison"
+I've drafted that note on AL-16. It hasn't been posted yet.
+
+Draft comment for AL-16:
+  "add a before/after comparison"
+Post this to Jira? [y/N]: y
+Comment posted to AL-16.
+```
+
+In Slack, the same drafted note appears as its own block under the answer with two buttons,
+**Post to Jira** and **Discard** — clicking Post posts the comment under your own configured
+Jira account (no separate credential needed) and updates that block in place to confirm, without
+touching the rest of the message.
 
 ## Slack Integration (optional)
 
@@ -151,10 +185,26 @@ Slack is fully optional — everything above works exactly the same with no Slac
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**.
 2. Under **Socket Mode**, enable it and generate an app-level token with the `connections:write` scope — this is `SLACK_APP_TOKEN`. Socket Mode means no public HTTPS endpoint or tunnel is needed; the app connects out to Slack over a websocket.
-3. Under **OAuth & Permissions**, add the `app_mentions:read` and `chat:write` bot scopes, then install the app to your workspace — this gives you `SLACK_BOT_TOKEN`.
-4. Under **Event Subscriptions**, subscribe to the `app_mention` bot event.
-5. Under **Interactivity & Shortcuts**, toggle it **on**. This is required for the reply buttons (Quick Links, standup summary) to work — no Request URL field needs filling in, since Socket Mode delivers button clicks the same way it delivers events, but Slack won't send them at all unless this toggle is on.
+3. Under **OAuth & Permissions**, add the `app_mentions:read`, `chat:write`, and `channels:history` bot scopes (the last one lets the bot read plain replies inside a thread it started — see "Continuing a conversation" below; add `groups:history`/`im:history`/`mpim:history` too if the bot will also be used in a private channel, DM, or group DM), then install the app to your workspace — this gives you `SLACK_BOT_TOKEN`.
+4. Under **Event Subscriptions**, subscribe to both the `app_mention` and `message.channels` bot events (add `message.groups`/`message.im`/`message.mpim` to match whichever extra scopes you added in step 3).
+5. Under **Interactivity & Shortcuts**, toggle it **on**. This is required for the reply buttons (Quick Links, standup summary, comment-draft confirm) to work — no Request URL field needs filling in, since Socket Mode delivers button clicks the same way it delivers events, but Slack won't send them at all unless this toggle is on.
 6. Invite the bot to a channel (`/invite @YourBotName`) and copy that channel's ID for `SLACK_CHANNEL_ID`.
+
+**If you're adding scopes/events to an app that's already installed:** Slack requires you to
+reinstall the app to the workspace any time you add a scope or event subscription — the OAuth &
+Permissions page shows a banner/button for this. Skipping the reinstall step is the most common
+reason a newly-added event silently never arrives.
+
+### Continuing a conversation
+
+Once the bot replies in a thread (via @-mention), you can keep replying in that same thread
+**without** @-mentioning it again — each plain reply continues the conversation with the earlier
+turns still in context, the same way the CLI's persistent session works. This only applies to
+threads the bot itself started; a reply to any other thread is left alone. The existing
+standup-summary and comment-draft-confirm buttons keep working on every reply, initial or
+follow-up. Conversation history is kept in memory per-thread and capped to the last few exchanges
+(`MAX_HISTORY_TURNS` in `app/agent/orchestrator.py`) to bound growing token cost, and is lost if
+the app process restarts.
 
 Add all three to `.env`, then start the server as usual — @-mention the bot and it replies in-thread using the same orchestrator as `/ask`.
 
@@ -216,6 +266,8 @@ Deferred intentionally for MVP scope — documented here rather than built:
 - **GitHub GraphQL API** instead of the REST Search API — a single query could pull PR/review data across multiple repos in one round trip, more efficient than the current per-query REST calls.
 - **OS keychain (`keyring` package)** instead of `.env` for credential storage — avoids plaintext secrets on disk.
 - **GitHub App auth** (short-lived, org-scoped, auditable installation tokens) instead of a personal access token — the "correct" production answer, but overkill for a single-user local tool.
+- **PR-linking for `get_persons_open_issues`** — currently Jira-only; the existing PR-linking helper is hardcoded to your own GitHub username, so extending it to look up an arbitrary teammate's authored PRs is a separate change.
+- **Comment pagination** for `get_issues_awaiting_my_response` — Jira's comment endpoint returns at most 50 comments per page; an issue with more than that would only have its first page inspected for an unanswered mention.
 
 ## Project Docs
 

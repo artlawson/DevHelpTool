@@ -540,6 +540,320 @@ async def test_get_backlog_issues_needing_details_returns_error_on_failure(
     assert result.error is not None
 
 
+async def test_get_persons_open_issues_resolves_exact_match_and_queries_by_account_id(
+    monkeypatch,
+):
+    mock_search_users = AsyncMock(
+        return_value=[
+            {
+                "accountId": "acc-1",
+                "displayName": "Sam Lee",
+                "emailAddress": "sam@x.com",
+            }
+        ]
+    )
+    mock_search = AsyncMock(return_value=[RAW_ISSUE])
+    monkeypatch.setattr(jira_tools.jira_client, "search_users", mock_search_users)
+    monkeypatch.setattr(jira_tools.jira_client, "search", mock_search)
+
+    result = await jira_tools.get_persons_open_issues("sam@x.com")
+
+    assert result.ok is True
+    assert result.data is not None
+    assert [i.key for i in result.data] == ["AL-1"]
+    (jql,), _ = mock_search.call_args
+    assert 'assignee = "acc-1"' in jql
+
+
+async def test_get_persons_open_issues_returns_note_on_zero_matches(monkeypatch):
+    mock_search_users = AsyncMock(return_value=[])
+    monkeypatch.setattr(jira_tools.jira_client, "search_users", mock_search_users)
+
+    result = await jira_tools.get_persons_open_issues("nobody")
+
+    assert result.ok is True
+    assert result.data == []
+    assert result.note is not None
+    assert "nobody" in result.note
+
+
+async def test_get_persons_open_issues_returns_note_on_ambiguous_match(monkeypatch):
+    mock_search_users = AsyncMock(
+        return_value=[
+            {
+                "accountId": "acc-1",
+                "displayName": "Sam Lee",
+                "emailAddress": "sam@x.com",
+            },
+            {
+                "accountId": "acc-2",
+                "displayName": "Sam Rivera",
+                "emailAddress": "sam.r@x.com",
+            },
+        ]
+    )
+    monkeypatch.setattr(jira_tools.jira_client, "search_users", mock_search_users)
+
+    result = await jira_tools.get_persons_open_issues("Sam")
+
+    assert result.ok is True
+    assert result.data == []
+    assert result.note is not None
+    assert "Sam Lee" in result.note
+    assert "Sam Rivera" in result.note
+
+
+async def test_get_persons_open_issues_ambiguous_note_lists_only_exact_matches(
+    monkeypatch,
+):
+    # Regression test: with 2+ *exact* name/email matches plus an unrelated
+    # fuzzy-only match from the same search, the note must be built from the
+    # exact matches only - falling back to the whole fuzzy result set would
+    # pull in the irrelevant match (and could truncate out a real one).
+    mock_search_users = AsyncMock(
+        return_value=[
+            {"accountId": "acc-1", "displayName": "Sam Lee", "emailAddress": "a@x.com"},
+            {"accountId": "acc-2", "displayName": "Sam Lee", "emailAddress": "b@x.com"},
+            {
+                "accountId": "acc-3",
+                "displayName": "Samantha Doe",
+                "emailAddress": "c@x.com",
+            },
+        ]
+    )
+    monkeypatch.setattr(jira_tools.jira_client, "search_users", mock_search_users)
+
+    result = await jira_tools.get_persons_open_issues("Sam Lee")
+
+    assert result.ok is True
+    assert result.data == []
+    assert result.note is not None
+    assert "a@x.com" in result.note
+    assert "b@x.com" in result.note
+    assert "Samantha Doe" not in result.note
+    assert "c@x.com" not in result.note
+
+
+async def test_get_persons_open_issues_filters_out_inactive_users(monkeypatch):
+    mock_search_users = AsyncMock(
+        return_value=[
+            {
+                "accountId": "acc-1",
+                "displayName": "Former Employee",
+                "emailAddress": "gone@x.com",
+                "active": False,
+            }
+        ]
+    )
+    monkeypatch.setattr(jira_tools.jira_client, "search_users", mock_search_users)
+
+    result = await jira_tools.get_persons_open_issues("gone@x.com")
+
+    assert result.ok is True
+    assert result.data == []
+    assert result.note is not None
+
+
+async def test_get_persons_open_issues_returns_error_on_failure(monkeypatch):
+    mock_search_users = AsyncMock(side_effect=RuntimeError("500 Internal Server Error"))
+    monkeypatch.setattr(jira_tools.jira_client, "search_users", mock_search_users)
+
+    result = await jira_tools.get_persons_open_issues("sam@x.com")
+
+    assert result.ok is False
+    assert result.error is not None
+
+
+async def test_draft_comment_returns_verbatim_draft_and_makes_no_jira_calls(
+    monkeypatch,
+):
+    # Proves draft_comment is non-mutating: any Jira client call made here
+    # would be a bug, so failing the mock is the test.
+    def _fail(*_args, **_kwargs):
+        raise AssertionError("draft_comment must not call the Jira client")
+
+    monkeypatch.setattr(jira_tools.jira_client, "search", _fail)
+    monkeypatch.setattr(jira_tools.jira_client, "add_comment", _fail)
+
+    result = await jira_tools.draft_comment("AL-5", "quick thought here")
+
+    assert result.ok is True
+    assert result.data is not None
+    assert result.data.issue_key == "AL-5"
+    assert result.data.note_text == "quick thought here"
+
+
+async def test_post_comment_posts_adf_body_and_returns_id(monkeypatch):
+    mock_add_comment = AsyncMock(return_value={"id": "10001"})
+    monkeypatch.setattr(jira_tools.jira_client, "add_comment", mock_add_comment)
+
+    result = await jira_tools.post_comment("AL-5", "quick thought here")
+
+    assert result.ok is True
+    assert result.data == "10001"
+    (issue_key, body), _ = mock_add_comment.call_args
+    assert issue_key == "AL-5"
+    assert body["content"][0]["content"][0]["text"] == "quick thought here"
+
+
+def test_plain_text_to_adf_splits_multiline_note_into_separate_paragraphs():
+    adf = jira_tools._plain_text_to_adf("first line\n\nthird line")
+
+    paragraphs = adf["content"]
+    assert len(paragraphs) == 3
+    assert paragraphs[0]["content"][0]["text"] == "first line"
+    assert paragraphs[1]["content"] == []
+    assert paragraphs[2]["content"][0]["text"] == "third line"
+
+
+async def test_post_comment_returns_error_on_failure(monkeypatch):
+    mock_add_comment = AsyncMock(side_effect=RuntimeError("404 Not Found"))
+    monkeypatch.setattr(jira_tools.jira_client, "add_comment", mock_add_comment)
+
+    result = await jira_tools.post_comment("AL-bad-key", "quick thought here")
+
+    assert result.ok is False
+    assert result.error is not None
+
+
+def _mention_comment(
+    comment_id: str, author_id: str, mentions: str | None = None
+) -> dict:
+    content: list[dict] = [{"type": "text", "text": "hey"}]
+    if mentions is not None:
+        content.append({"type": "mention", "attrs": {"id": mentions}})
+    return {
+        "id": comment_id,
+        "author": {"accountId": author_id},
+        "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [{"type": "paragraph", "content": content}],
+        },
+    }
+
+
+def test_adf_contains_mention_true_when_nested():
+    body = {
+        "type": "doc",
+        "content": [
+            {
+                "type": "paragraph",
+                "content": [{"type": "mention", "attrs": {"id": "me-123"}}],
+            }
+        ],
+    }
+    assert jira_tools._adf_contains_mention(body, "me-123") is True
+
+
+def test_adf_contains_mention_false_when_absent():
+    body = {"type": "doc", "content": [{"type": "paragraph", "content": []}]}
+    assert jira_tools._adf_contains_mention(body, "me-123") is False
+
+
+async def test_get_issues_awaiting_my_response_flags_mention_with_no_reply(
+    monkeypatch,
+):
+    mock_get_myself = AsyncMock(return_value={"accountId": "me-123"})
+    mock_search = AsyncMock(return_value=[RAW_ISSUE])
+    mock_get_comments = AsyncMock(
+        return_value=[_mention_comment("1", "teammate-1", mentions="me-123")]
+    )
+    monkeypatch.setattr(jira_tools.jira_client, "get_myself", mock_get_myself)
+    monkeypatch.setattr(jira_tools.jira_client, "search", mock_search)
+    monkeypatch.setattr(jira_tools.jira_client, "get_comments", mock_get_comments)
+
+    result = await jira_tools.get_issues_awaiting_my_response()
+
+    assert result.ok is True
+    assert result.data is not None
+    assert [i.key for i in result.data] == ["AL-1"]
+
+
+async def test_get_issues_awaiting_my_response_not_flagged_when_i_replied_after(
+    monkeypatch,
+):
+    mock_get_myself = AsyncMock(return_value={"accountId": "me-123"})
+    mock_search = AsyncMock(return_value=[RAW_ISSUE])
+    mock_get_comments = AsyncMock(
+        return_value=[
+            _mention_comment("1", "teammate-1", mentions="me-123"),
+            _mention_comment("2", "me-123"),
+        ]
+    )
+    monkeypatch.setattr(jira_tools.jira_client, "get_myself", mock_get_myself)
+    monkeypatch.setattr(jira_tools.jira_client, "search", mock_search)
+    monkeypatch.setattr(jira_tools.jira_client, "get_comments", mock_get_comments)
+
+    result = await jira_tools.get_issues_awaiting_my_response()
+
+    assert result.ok is True
+    assert result.data == []
+
+
+async def test_get_issues_awaiting_my_response_still_flagged_when_someone_else_replies(
+    monkeypatch,
+):
+    # This is the specific case distinguishing the locked design from the
+    # rejected "last comment isn't mine" rule: a mention aimed at me with no
+    # reply *from me* still counts as awaiting my response, even if a third
+    # party commented afterward (their comment may be the resolution, not a
+    # reply on my behalf).
+    mock_get_myself = AsyncMock(return_value={"accountId": "me-123"})
+    mock_search = AsyncMock(return_value=[RAW_ISSUE])
+    mock_get_comments = AsyncMock(
+        return_value=[
+            _mention_comment("1", "teammate-1", mentions="me-123"),
+            _mention_comment("2", "teammate-2"),
+        ]
+    )
+    monkeypatch.setattr(jira_tools.jira_client, "get_myself", mock_get_myself)
+    monkeypatch.setattr(jira_tools.jira_client, "search", mock_search)
+    monkeypatch.setattr(jira_tools.jira_client, "get_comments", mock_get_comments)
+
+    result = await jira_tools.get_issues_awaiting_my_response()
+
+    assert result.ok is True
+    assert result.data is not None
+    assert [i.key for i in result.data] == ["AL-1"]
+
+
+async def test_get_issues_awaiting_my_response_not_flagged_when_no_mention(monkeypatch):
+    mock_get_myself = AsyncMock(return_value={"accountId": "me-123"})
+    mock_search = AsyncMock(return_value=[RAW_ISSUE])
+    mock_get_comments = AsyncMock(return_value=[_mention_comment("1", "teammate-1")])
+    monkeypatch.setattr(jira_tools.jira_client, "get_myself", mock_get_myself)
+    monkeypatch.setattr(jira_tools.jira_client, "search", mock_search)
+    monkeypatch.setattr(jira_tools.jira_client, "get_comments", mock_get_comments)
+
+    result = await jira_tools.get_issues_awaiting_my_response()
+
+    assert result.ok is True
+    assert result.data == []
+
+
+async def test_get_issues_awaiting_my_response_empty_pool(monkeypatch):
+    mock_get_myself = AsyncMock(return_value={"accountId": "me-123"})
+    mock_search = AsyncMock(return_value=[])
+    monkeypatch.setattr(jira_tools.jira_client, "get_myself", mock_get_myself)
+    monkeypatch.setattr(jira_tools.jira_client, "search", mock_search)
+
+    result = await jira_tools.get_issues_awaiting_my_response()
+
+    assert result.ok is True
+    assert result.data == []
+
+
+async def test_get_issues_awaiting_my_response_returns_error_on_failure(monkeypatch):
+    mock_get_myself = AsyncMock(side_effect=RuntimeError("500 Internal Server Error"))
+    monkeypatch.setattr(jira_tools.jira_client, "get_myself", mock_get_myself)
+
+    result = await jira_tools.get_issues_awaiting_my_response()
+
+    assert result.ok is False
+    assert result.error is not None
+
+
 async def test_neither_tool_module_imports_anthropic():
     import ast
     import inspect
