@@ -304,10 +304,13 @@ def _drop_bullet_before_priority_emoji(text: str) -> str:
     return _BULLET_BEFORE_PRIORITY_EMOJI_PATTERN.sub("", text)
 
 
-# Always offered, regardless of what was asked - the caller shouldn't have to
-# guess whether a given question was "about standup" for this to show up (see
-# CLAUDE.md/conversation: the assistant must not assume "what should I work on
-# today" implies a standup summary is wanted).
+# Offered on the first reply in a conversation, never inferred from what was
+# asked (see CLAUDE.md/conversation: the assistant must not assume "what
+# should I work on today" implies a standup summary is wanted) - but also
+# never repeated on every thread reply after that, since a multi-turn
+# back-and-forth would otherwise end with a stack of these prompts, one per
+# reply. bolt_app.py's _answer_and_reply decides "first reply" by checking
+# whether the thread had no prior history before this call.
 _STANDUP_FOLLOWUP_PROMPT = (
     "Is this enough for standup, or would you like a more succinct summary "
     "to prep with?"
@@ -381,7 +384,9 @@ def replace_comment_draft_blocks(blocks: list[dict], outcome_text: str) -> list[
     return [*remaining[:insert_at], outcome_block, *remaining[insert_at:]]
 
 
-def format_ask_response(response: AskResponse) -> list[dict]:
+def format_ask_response(
+    response: AskResponse, *, include_standup_prompt: bool = True
+) -> list[dict]:
     text = _sanitize_markdown_for_slack(response.answer)
     text = _hyperlink_prs(text, response.referenced_prs)
     text = _hyperlink_and_flag_issues(text, response.referenced_issues)
@@ -391,33 +396,40 @@ def format_ask_response(response: AskResponse) -> list[dict]:
         if response.pending_comment_draft is not None
         else []
     )
+    standup_blocks: list[dict] = (
+        [
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": _STANDUP_FOLLOWUP_PROMPT},
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "This is enough"},
+                        "action_id": "ask_standup_dismiss",
+                    },
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Give me a succinct summary",
+                        },
+                        "action_id": "ask_standup_summary",
+                    },
+                ],
+            },
+        ]
+        if include_standup_prompt
+        else []
+    )
     return [
         {
             "type": "section",
             "text": {"type": "mrkdwn", "text": text},
         },
         *draft_blocks,
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": _STANDUP_FOLLOWUP_PROMPT},
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "This is enough"},
-                    "action_id": "ask_standup_dismiss",
-                },
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "Give me a succinct summary",
-                    },
-                    "action_id": "ask_standup_summary",
-                },
-            ],
-        },
+        *standup_blocks,
     ]

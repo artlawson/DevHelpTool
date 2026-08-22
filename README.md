@@ -1,13 +1,20 @@
 # Engineering Productivity Agent
 
-A local FastAPI service that answers natural-language questions about your current engineering work — "what should I work on today?", "which high-priority Jira tickets don't have PRs?", "which of my tickets already have a matching PR?", "what's awaiting my review?", "what is Sam working on?" — by orchestrating a hand-rolled Claude tool-calling loop over the Jira and GitHub REST APIs.
+A local FastAPI service that answers natural-language questions about your current engineering work — "what should I work on today?", "which high-priority Jira tickets don't have PRs?", "which of my tickets already have a matching PR?", "what's awaiting my review?", "what is Sam working on?", "is anyone waiting on a reply from me?" — by orchestrating a hand-rolled Claude tool-calling loop over the Jira and GitHub REST APIs.
 
 Data is fetched and deterministically ranked in Python (priority, due date, review-request age); Claude's role is limited to deciding which tools to call and narrating the final answer — it never decides what's "important."
+
+<p align="center">
+  <img src="docs/images/slack-thread.png" alt="Slack thread: the bot answers a status question, offers a standup-summary shortcut, and keeps answering follow-ups in the same thread with no re-mention needed" width="640"><br>
+  <sub>Recreated UI with example data, illustrating real formatting/behavior — not a live screenshot.</sub>
+</p>
 
 ## Architecture
 
 Three entry points, all calling the same orchestrator — only `/ask` goes through FastAPI at all;
-Slack and the CLI call `handle_query()` directly, in-process, no HTTP round trip:
+Slack and the CLI call the orchestrator directly, in-process, no HTTP round trip. Slack and the
+CLI's interactive session also carry conversation history between calls (`handle_conversational_query()`);
+`/ask` and one-off CLI queries stay single-turn (`handle_query()`):
 
 - `curl` / any HTTP client → `POST /ask` → `app/main.py`
 - Slack @-mention → `app/slack/bolt_app.py` (Socket Mode, in-process)
@@ -109,14 +116,7 @@ A `devhelp` command is installed with the package (see Setup above) as a thin te
 over the same orchestrator used by `/ask` and the Slack @-mention — no FastAPI server needs to
 be running:
 
-```bash
-devhelp
-Ask: what should I work on today?
-...
-Ask: does that top one have a due date?
-...
-Ask:
-```
+<p align="center"><img src="docs/images/cli-session.png" alt="devhelp interactive session: a status question, a follow-up that resolves against the prior answer with no ticket key repeated, and a live Ask: prompt" width="620"></p>
 
 Run it with no arguments and it opens a **persistent session**: each answer stays in context for
 the next question (so "does that top one have a due date?" resolves correctly without repeating
@@ -176,6 +176,8 @@ In Slack, the same drafted note appears as its own block under the answer with t
 **Post to Jira** and **Discard** — clicking Post posts the comment under your own configured
 Jira account (no separate credential needed) and updates that block in place to confirm, without
 touching the rest of the message.
+
+<p align="center"><img src="docs/images/slack-comment-draft.png" alt="Slack message showing a drafted Jira comment and Post to Jira / Discard buttons, before anything has been written to Jira" width="620"></p>
 
 ## Slack Integration (optional)
 

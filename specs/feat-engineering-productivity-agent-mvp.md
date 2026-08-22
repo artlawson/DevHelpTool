@@ -26,7 +26,12 @@ Checking "what do I need to do today" currently means manually opening Jira, fil
 ## 4) Non-Goals
 
 - Multi-agent orchestration or agent-to-agent handoff
-- RAG / vector database / long-term conversation memory
+- RAG / vector database / **long-term** conversation memory - Slack threads and the CLI's
+  interactive session do carry conversation history now (`orchestrator.handle_conversational_query()`),
+  but it's short-term by construction: capped to the last `MAX_HISTORY_TURNS` exchanges, held in
+  plain in-memory Python state (no database, no vector store, no retrieval), and lost on process
+  restart. This is a distinct, much narrower thing than what this line was originally ruling
+  out - see CLAUDE.md's CLI and Slack Integration sections for the full design.
 - Autonomous/scheduled background execution
 - Production authentication (OAuth flows, multi-tenant auth, token refresh services)
 - Web dashboard or any frontend beyond the API itself

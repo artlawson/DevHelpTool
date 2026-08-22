@@ -371,7 +371,7 @@ def test_format_ask_response_leads_with_the_answer():
     assert blocks[0]["text"]["text"] == "You have 2 high priority tickets."
 
 
-def test_format_ask_response_always_offers_standup_followup_buttons():
+def test_format_ask_response_offers_standup_followup_buttons_by_default():
     response = AskResponse(answer="Some unrelated answer.", tool_calls=[], warnings=[])
 
     blocks = format_ask_response(response)
@@ -380,6 +380,16 @@ def test_format_ask_response_always_offers_standup_followup_buttons():
     assert len(actions_blocks) == 1
     action_ids = {el["action_id"] for el in actions_blocks[0]["elements"]}
     assert action_ids == {"ask_standup_dismiss", "ask_standup_summary"}
+
+
+def test_format_ask_response_omits_standup_followup_buttons_when_not_initial():
+    response = AskResponse(answer="Some unrelated answer.", tool_calls=[], warnings=[])
+
+    blocks = format_ask_response(response, include_standup_prompt=False)
+
+    assert not any(b["type"] == "actions" for b in blocks)
+    assert not any(b["type"] == "divider" for b in blocks)
+    assert len(blocks) == 1
 
 
 def test_format_ask_response_converts_double_asterisk_bold_to_slack_bold():

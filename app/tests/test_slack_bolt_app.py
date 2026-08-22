@@ -104,6 +104,49 @@ async def test_handle_mention_uses_thread_root_not_own_ts_when_already_in_a_thre
     assert kwargs["thread_ts"] == "111.000"
 
 
+async def test_handle_mention_includes_standup_prompt_on_initial_question(
+    monkeypatch,
+):
+    monkeypatch.setattr(bolt_app, "_thread_histories", {})
+    response = AskResponse(answer="answer", tool_calls=[], warnings=[])
+    mock_handle_conversational_query = AsyncMock(return_value=(response, []))
+    monkeypatch.setattr(
+        bolt_app, "handle_conversational_query", mock_handle_conversational_query
+    )
+
+    say = AsyncMock()
+    event = {"text": "<@U012ABCDEF> what should I work on today?", "ts": "123.456"}
+    await bolt_app.handle_mention(event, say)
+
+    _, kwargs = say.call_args
+    assert any(b["type"] == "actions" for b in kwargs["blocks"])
+
+
+async def test_handle_mention_omits_standup_prompt_on_second_mention_in_thread(
+    monkeypatch,
+):
+    # A re-mention inside a thread that already has history is a reply, not
+    # the conversation's initial question - the "want a succinct summary?"
+    # prompt should only ever show up once, on the first answer.
+    monkeypatch.setattr(bolt_app, "_thread_histories", {"111.000": []})
+    response = AskResponse(answer="answer 2", tool_calls=[], warnings=[])
+    mock_handle_conversational_query = AsyncMock(return_value=(response, []))
+    monkeypatch.setattr(
+        bolt_app, "handle_conversational_query", mock_handle_conversational_query
+    )
+
+    say = AsyncMock()
+    event = {
+        "text": "<@U012ABCDEF> second question",
+        "ts": "222.000",
+        "thread_ts": "111.000",
+    }
+    await bolt_app.handle_mention(event, say)
+
+    _, kwargs = say.call_args
+    assert not any(b["type"] == "actions" for b in kwargs["blocks"])
+
+
 async def test_handle_mention_stores_and_reuses_thread_history(monkeypatch):
     monkeypatch.setattr(bolt_app, "_thread_histories", {})
     history_after_1 = [{"role": "user", "content": "first question"}]
@@ -367,6 +410,7 @@ async def test_handle_thread_reply_continues_conversation_in_a_tracked_thread(
     _, kwargs = say.call_args
     assert kwargs["thread_ts"] == "111.000"
     assert bolt_app._thread_histories["111.000"] == []
+    assert not any(b["type"] == "actions" for b in kwargs["blocks"])
 
 
 async def test_handle_thread_reply_ignores_the_bots_own_messages(monkeypatch):

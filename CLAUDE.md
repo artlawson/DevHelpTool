@@ -523,10 +523,17 @@ Two independent entry points, neither of which changes `/ask`'s behavior:
   shared `_ack_only` handler for `digest_open_jira`/`digest_view_pr` (and
   `ask_standup_dismiss`, below) purely to satisfy that.
 - **Standup summary** (`app/slack/digest.py:build_standup_summary`,
-  `app/slack/formatting.py:format_standup_summary`): every `/ask`/@-mention reply
-  (`format_ask_response`) unconditionally appends a "want a succinct standup summary?"
-  prompt with two buttons — never inferred from the question text (asking is the point;
-  "what should I work on today" must not be assumed to mean "give me a standup summary").
+  `app/slack/formatting.py:format_standup_summary`): the *first* `/ask`/@-mention reply in a
+  conversation (`format_ask_response(response, include_standup_prompt=...)`) appends a "want a
+  succinct standup summary?" prompt with two buttons — never inferred from the question text
+  (asking is the point; "what should I work on today" must not be assumed to mean "give me a
+  standup summary"). `include_standup_prompt` defaults to `True` but `bolt_app.py`'s
+  `_answer_and_reply` passes `False` whenever the thread already had history before this call
+  (a plain thread reply via `handle_thread_reply`, or a second `@`-mention landing in an
+  already-open thread) — a locked, deliberate change from the prompt's original "every reply,
+  no exceptions" behavior: once `_thread_histories` made multi-turn threads possible, repeating
+  this prompt on every turn of a back-and-forth just became visual noise, so it's now offered
+  once, on the reply that opens the thread, and never again in that same thread.
   Clicking `ask_standup_summary` (handled in `bolt_app.py`) bypasses the LLM/orchestrator
   entirely — it calls `jira_tools.get_my_issues_with_linked_prs()` (not
   `get_my_high_priority_issues()` — the PR-annotated tool, specifically so a "Doing" issue's

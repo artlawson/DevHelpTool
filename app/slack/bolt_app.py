@@ -59,6 +59,7 @@ def _mentions_bot(text: str, bot_user_id: str | None) -> bool:
 async def _answer_and_reply(query: str, thread_ts: str, say: AsyncSay) -> None:
     async with _thread_locks[thread_ts]:
         history = _thread_histories.get(thread_ts)
+        is_initial_question = history is None
         try:
             response, history = await handle_conversational_query(query, history)
         except OrchestratorUnavailable:
@@ -69,7 +70,9 @@ async def _answer_and_reply(query: str, thread_ts: str, say: AsyncSay) -> None:
             return
         _thread_histories[thread_ts] = history
     await say(
-        blocks=format_ask_response(response),
+        blocks=format_ask_response(
+            response, include_standup_prompt=is_initial_question
+        ),
         text=response.answer,
         thread_ts=thread_ts,
     )
